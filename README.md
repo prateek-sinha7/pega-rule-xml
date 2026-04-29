@@ -34,7 +34,7 @@ cd pega-rule-xml
 
 # Create and activate a virtual environment
 python3 -m venv venv
-source venv_mac/bin/activate        # macOS / Linux
+source venv/bin/activate        # macOS / Linux
 # venv_mac\Scripts\activate         # Windows
 
 # Install dependencies
@@ -119,11 +119,13 @@ LOG_LEVEL=DEBUG python -m pega_xml_downloader --headless false
 
 ## Output
 
-All files are written to `OUTPUT_DIR` (default: `output/`):
+All files are written to `OUTPUT_DIR` (default: `~/Downloads/`):
 
 ```
-xml_output/
+~/Downloads/
 ├── Tax_Compliance_Training_20260429_162741.xml   ← downloaded XML
+├── Tax_Cost_Allocation_20260429_163012.xml
+├── Tax_Data_Collection_20260429_163245.xml
 ├── FAILED_view_xml_timeout_..._20260429T163000.png  ← screenshot on failure
 ├── execution_log.jsonl                           ← structured result log
 └── downloader.log                                ← full run log

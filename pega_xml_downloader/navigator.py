@@ -245,11 +245,23 @@ def navigate_to_case_type(
         raise NavigationError("Failed to navigate to Case Types section") from exc
 
     # Step 3: Locate and CLICK the target Case Type in the tree grid
-    # In Dev Studio, case types are listed as <a class="explorer_primary"> links
-    # inside a tree grid with data-test-id="201711201100250725554"
     logger.info("Locating Case Type '%s'", case_type_name)
     try:
         _wait_for_mask_to_clear(driver)
+
+        # Record existing PegaGadget iframes BEFORE clicking the case type link
+        # so we can detect the NEW summary gadget that appears after clicking
+        gadgets_before_case_type_click = {
+            el.get_attribute("id")
+            for el in driver.find_elements(
+                By.CSS_SELECTOR, "iframe[id^='PegaGadget'][id$='Ifr']"
+            )
+        }
+        logger.info(
+            "PegaGadget iframes before clicking case type: %s",
+            gadgets_before_case_type_click,
+        )
+
         case_type_link = wait.until(
             EC.presence_of_element_located(
                 (
@@ -266,27 +278,63 @@ def navigate_to_case_type(
         logger.info("Clicked Case Type '%s'", case_type_name)
         _wait_for_page_ready(driver, timeout=60)
     except TimeoutException as exc:
-        logger.error(
-            "Case Type '%s' not found in the Case Types tree", case_type_name
-        )
+        # Collect all available case type names to help the user correct the spelling
+        try:
+            available = driver.execute_script(
+                """
+                return Array.from(
+                    document.querySelectorAll('a.explorer_primary, a[class*="explorer_primary"]')
+                ).map(el => el.textContent.trim() || el.getAttribute('title') || '').filter(t => t);
+                """
+            )
+        except Exception:
+            available = []
+
+        if available:
+            logger.error(
+                "Case Type '%s' not found. Available case types are: %s",
+                case_type_name,
+                available,
+            )
+        else:
+            logger.error(
+                "Case Type '%s' not found in the Case Types tree. "
+                "Check the spelling — it must match exactly as shown in Pega Dev Studio.",
+                case_type_name,
+            )
         capture_screenshot(driver, output_dir, "case_type_not_found")
         raise NavigationError(
+            f"Case Type '{case_type_name}' not found. "
+            f"Available: {available}" if available else
             f"Case Type '{case_type_name}' not found in the Case Types tree"
         ) from exc
 
-    # Step 4: The Case Type editor loads inside a nested iframe (PegaGadget0Ifr).
-    # Switch into it, then click Actions → Open.
+    # Step 4: Find the NEW PegaGadget that loaded the case type summary,
+    # then click Actions → Open in it.
     logger.info("Looking for toolbar Actions → Open")
     try:
-        # Switch to the PegaGadget iframe where the Case Type editor loads
-        logger.info("Switching to PegaGadget iframe for Case Type editor")
-        gadget_iframe = WebDriverWait(driver, 60).until(
-            EC.presence_of_element_located(
-                (By.CSS_SELECTOR, "iframe[id^='PegaGadget'][id$='Ifr']")
-            )
+        # Find the new PegaGadget that appeared after clicking the case type link
+        # It contains the case type summary with the Actions → Open button
+        def _summary_gadget_appeared(d):
+            current = {
+                el.get_attribute("id")
+                for el in d.find_elements(
+                    By.CSS_SELECTOR, "iframe[id^='PegaGadget'][id$='Ifr']"
+                )
+            }
+            new_ones = current - gadgets_before_case_type_click
+            return list(new_ones) if new_ones else False
+
+        logger.info("Waiting for case type summary PegaGadget to appear...")
+        summary_gadget_ids = WebDriverWait(driver, 60).until(_summary_gadget_appeared)
+        summary_gadget_id = summary_gadget_ids[0]
+        logger.info("Case type summary loaded in: id='%s'", summary_gadget_id)
+
+        summary_gadget_el = driver.find_element(
+            By.CSS_SELECTOR, f"iframe#{summary_gadget_id}"
         )
-        driver.switch_to.frame(gadget_iframe)
-        logger.info("Switched to PegaGadget iframe")
+        driver.switch_to.frame(summary_gadget_el)
+        logger.info("Switched to case type summary PegaGadget: id='%s'", summary_gadget_id)
         _wait_for_page_ready(driver, timeout=60)
 
         # Now find the "Actions" button in the toolbar
@@ -309,6 +357,33 @@ def navigate_to_case_type(
 
         _wait_for_mask_to_clear(driver)
 
+        # Record existing PegaGadget iframe IDs BEFORE clicking Open
+        # so we can detect the NEW rule editor gadget that appears after Open
+        driver.switch_to.default_content()
+        dev_iframe_ref = WebDriverWait(driver, 15).until(
+            EC.presence_of_element_located(
+                (By.CSS_SELECTOR, "iframe#Developer, iframe[name='Developer']")
+            )
+        )
+        driver.switch_to.frame(dev_iframe_ref)
+        gadgets_before_open = {
+            el.get_attribute("id")
+            for el in driver.find_elements(
+                By.CSS_SELECTOR, "iframe[id^='PegaGadget'][id$='Ifr']"
+            )
+        }
+        logger.info("PegaGadget iframes BEFORE clicking Open: %s", gadgets_before_open)
+
+        # Switch back into the summary gadget to click Open
+        summary_el_again = driver.find_element(
+            By.CSS_SELECTOR, f"iframe#{summary_gadget_id}"
+        )
+        driver.switch_to.frame(summary_el_again)
+        logger.info("Re-entered summary gadget '%s' to click Open", summary_gadget_id)
+
+        # Click "Open" in the Actions dropdown        driver.switch_to.frame(gadget_els_now_sorted[0])
+        logger.info("Re-entered PegaGadget0Ifr to click Open")
+
         # Click "Open" in the Actions dropdown
         logger.info("Looking for 'Open' in Actions dropdown")
         open_item = wait.until(
@@ -330,9 +405,8 @@ def navigate_to_case_type(
 
         _wait_for_page_ready(driver, timeout=60)
 
-        # After Actions → Open, the Case Type rule view loads in a NEW PegaGadget
-        # iframe (PegaGadget1Ifr). Switch back to Developer iframe, then into the
-        # LAST PegaGadget iframe which contains the rule view with Stages tab.
+        # After Actions → Open, wait for a NEW PegaGadget iframe to appear
+        # (one that wasn't in gadgets_before_open).
         logger.info("Re-entering iframe chain after Actions → Open")
         try:
             driver.switch_to.default_content()
@@ -344,25 +418,30 @@ def navigate_to_case_type(
             driver.switch_to.frame(dev_iframe)
             logger.info("Switched back to Developer iframe")
 
-            # Wait for the new PegaGadget iframe to fully load
-            # It may take time for the rule view to render
+            # Wait for a NEW PegaGadget iframe to appear (not in gadgets_before_open)
+            def _new_gadget_appeared(d):
+                current_ids = {
+                    el.get_attribute("id")
+                    for el in d.find_elements(
+                        By.CSS_SELECTOR, "iframe[id^='PegaGadget'][id$='Ifr']"
+                    )
+                }
+                new_ones = current_ids - gadgets_before_open
+                return list(new_ones) if new_ones else False
+
+            logger.info("Waiting for new PegaGadget iframe to appear after Open...")
+            new_ids = WebDriverWait(driver, 60).until(_new_gadget_appeared)
+            new_id = new_ids[0]
+            logger.info("New PegaGadget iframe appeared: id='%s'", new_id)
+
+            # Switch into the new iframe
+            new_el = driver.find_element(By.CSS_SELECTOR, f"iframe#{new_id}")
+            driver.switch_to.frame(new_el)
+            logger.info("Switched to new PegaGadget iframe: id='%s'", new_id)
             _wait_for_page_ready(driver, timeout=60)
 
-            # Find ALL PegaGadget iframes and switch to the LAST one
-            gadget_iframes = WebDriverWait(driver, 60).until(
-                lambda d: [el for el in d.find_elements(By.CSS_SELECTOR, "iframe[id^='PegaGadget'][id$='Ifr']") if len(d.find_elements(By.CSS_SELECTOR, "iframe[id^='PegaGadget'][id$='Ifr']")) >= 2]
-            )
-            logger.info("Found %d PegaGadget iframes", len(gadget_iframes))
-            for i, gf in enumerate(gadget_iframes):
-                logger.info("  PegaGadget[%d]: id='%s'", i, gf.get_attribute("id") or "")
-
-            target_iframe = gadget_iframes[-1]
-            logger.info("Switching to last PegaGadget iframe: id='%s'", target_iframe.get_attribute("id") or "")
-            driver.switch_to.frame(target_iframe)
-            logger.info("Switched to PegaGadget iframe for rule view")
-            _wait_for_page_ready(driver, timeout=60)
-        except TimeoutException:
-            logger.warning("Could not enter PegaGadget iframe after Actions → Open")
+        except Exception as exc:
+            logger.warning("Could not enter new PegaGadget iframe after Actions → Open: %s", exc)
 
         logger.info(
             "Rule-level view opened (URL: %s, title='%s')",
@@ -383,53 +462,72 @@ def extract_case_type_xml(
     case_type_name: str,
     output_dir: str = "output",
 ) -> Optional[str]:
-    """Extract XML for the currently open Case Type rule view.
+    """Extract XML by navigating into the correct PegaGadget iframe and
+    clicking Actions → View XML.
 
-    Called immediately after navigate_to_case_type() has opened the rule-level
-    view via Actions → Open. This function simply clicks Actions → View XML on
-    that page, switches to the popup, extracts the XML, closes the popup, and
-    returns the content.
-
-    No stage tab navigation or per-stage looping is performed.
-
-    Steps:
-    1. Wait for the page to settle inside the PegaGadget iframe.
-    2. Click the "Actions" toolbar button.
-    3. Click "View XML" in the dropdown.
-    4. Switch to the XML popup window.
-    5. Extract the full XML text from the popup (<pre> or <body>).
-    6. Close the popup and return to the main window.
+    This function assumes navigate_to_case_type() has already been called
+    and Actions → Open has been clicked. It re-enters the iframe chain from
+    default_content to ensure it is always in the correct context, then
+    clicks Actions → View XML, handles the popup, and returns the XML.
 
     Args:
-        driver: The active Chrome WebDriver instance, already inside the
-            PegaGadget iframe with the Case Type rule view loaded.
+        driver: The active Chrome WebDriver instance.
         case_type_name: Name of the Case Type (used for logging only).
         output_dir: Directory for screenshots on failure.
 
     Returns:
         The XML content string, or None if extraction fails.
     """
-    wait = WebDriverWait(driver, 30)
     main_handle = driver.window_handles[0]
 
     logger.info(
         "Starting Actions → View XML extraction for Case Type '%s'",
         case_type_name,
     )
-    logger.info(
-        "Current page state — URL: %s, title='%s'",
-        driver.current_url,
-        driver.title,
-    )
 
     try:
-        # Step 1: Wait for the page to fully settle
-        _wait_for_page_ready(driver, timeout=60)
-        logger.info("Page settled — ready to click Actions")
+        # Always re-enter the iframe chain from scratch to ensure correct context.
+        # Go: default_content → Developer iframe → the new PegaGadget iframe
+        # that was opened by Actions → Open (tracked via gadgets_before_open).
+        logger.info("Re-entering iframe chain from default_content for View XML")
+        driver.switch_to.default_content()
 
-        # Step 2: Find and click the "Actions" toolbar button
-        logger.info("Looking for 'Actions' toolbar button")
-        actions_button = wait.until(
+        dev_iframe = WebDriverWait(driver, 30).until(
+            EC.presence_of_element_located(
+                (By.CSS_SELECTOR, "iframe#Developer, iframe[name='Developer']")
+            )
+        )
+        driver.switch_to.frame(dev_iframe)
+        logger.info("Switched to Developer iframe")
+
+        # Find all PegaGadget iframes and pick the highest-numbered one
+        # (the one opened by Actions → Open is always the highest)
+        gadget_els = driver.find_elements(
+            By.CSS_SELECTOR, "iframe[id^='PegaGadget'][id$='Ifr']"
+        )
+
+        def _gadget_num(el):
+            gid = el.get_attribute("id") or ""
+            try:
+                return int(gid.replace("PegaGadget", "").replace("Ifr", ""))
+            except ValueError:
+                return -1
+
+        gadget_els_sorted = sorted(gadget_els, key=_gadget_num)
+        all_ids = [el.get_attribute("id") for el in gadget_els_sorted]
+        logger.info("PegaGadget iframes available: %s", all_ids)
+
+        target_el = gadget_els_sorted[-1]
+        target_id = target_el.get_attribute("id")
+        logger.info("Switching into PegaGadget iframe: id='%s'", target_id)
+        driver.switch_to.frame(target_el)
+        logger.info("Inside PegaGadget iframe: id='%s'", target_id)
+
+        _wait_for_page_ready(driver, timeout=30)
+
+        # Click Actions → View XML
+        logger.info("Looking for 'Actions' toolbar button for View XML")
+        actions_button = WebDriverWait(driver, 30).until(
             EC.presence_of_element_located(
                 (
                     By.XPATH,
@@ -440,128 +538,110 @@ def extract_case_type_xml(
                 )
             )
         )
-        logger.info("Found 'Actions' toolbar button, clicking")
+        logger.info("Found 'Actions' button, clicking")
         driver.execute_script("arguments[0].click();", actions_button)
-        logger.info("Clicked 'Actions' toolbar button")
+        logger.info("Clicked 'Actions' button")
 
-        # Wait for the dropdown to render
         _wait_for_mask_to_clear(driver)
-        time.sleep(1)  # Brief pause for dropdown animation
+        time.sleep(1)
 
-        # Step 3: Find and click "View XML" in the dropdown
-        logger.info("Looking for 'View XML' in Actions dropdown")
-        view_xml_item = wait.until(
-            EC.presence_of_element_located(
-                (
-                    By.XPATH,
-                    "//a[contains(text(),'View XML')] | "
-                    "//span[contains(text(),'View XML')]/ancestor::a | "
-                    "//*[@role='menuitem'][contains(text(),'View XML')] | "
-                    "//li//a[contains(text(),'View XML')] | "
-                    "//*[contains(@class,'menu')]//a[contains(text(),'View XML')] | "
-                    "//*[contains(@class,'menu')]//*[contains(text(),'View XML')]",
-                )
+        # Dump dropdown items for debugging
+        try:
+            menu_items = driver.execute_script(
+                "return Array.from(document.querySelectorAll("
+                "'[class*=menu] a, [role=menuitem], li a'"
+                ")).map(e => e.textContent.trim()).filter(t => t);"
             )
-        )
-        logger.info("Found 'View XML' menu item, clicking")
+            logger.info("Actions dropdown items: %s", menu_items)
+        except Exception:
+            pass
+
+        # Find and click View XML — retry up to 3 times if dropdown closes
+        view_xml_item = None
+        for attempt in range(3):
+            try:
+                view_xml_item = WebDriverWait(driver, 10).until(
+                    EC.presence_of_element_located(
+                        (
+                            By.XPATH,
+                            "//a[contains(text(),'View XML')] | "
+                            "//span[contains(text(),'View XML')]/ancestor::a | "
+                            "//*[@role='menuitem'][contains(text(),'View XML')] | "
+                            "//li//a[contains(text(),'View XML')]",
+                        )
+                    )
+                )
+                logger.info("Found 'View XML' on attempt %d", attempt + 1)
+                break
+            except TimeoutException:
+                if attempt < 2:
+                    logger.info("'View XML' not found (attempt %d) — reopening Actions", attempt + 1)
+                    try:
+                        btn = driver.find_element(
+                            By.XPATH,
+                            "//button[normalize-space(text())='Actions'] | "
+                            "//a[normalize-space(text())='Actions']"
+                        )
+                        driver.execute_script("arguments[0].click();", btn)
+                        time.sleep(1)
+                    except Exception:
+                        pass
+                else:
+                    raise TimeoutException(
+                        f"'View XML' not found in Actions dropdown for '{case_type_name}'"
+                    )
+
+        logger.info("Clicking 'View XML'")
         driver.execute_script("arguments[0].click();", view_xml_item)
-        logger.info("Clicked 'View XML' — waiting for popup window")
+        logger.info("Clicked 'View XML' — waiting for popup")
 
-        # Step 4: Wait for XML to appear — check if a new window opened.
-        # Give Pega 3 seconds to react to the View XML click.
-        logger.info("Waiting briefly for Pega to react to 'View XML' click")
+        # Wait for popup window
         time.sleep(3)
-
         current_handles = set(driver.window_handles)
-        logger.info(
-            "Window handles after 'View XML' click: %d handle(s) — %s",
-            len(current_handles),
-            current_handles,
-        )
+        logger.info("Window handles after View XML: %d — %s", len(current_handles), current_handles)
 
         if len(current_handles) > 1:
-            # A new window opened — switch directly to it (do NOT call switch_to_popup
-            # which would wait for yet another new window)
             new_handles = current_handles - {main_handle}
             popup_handle = new_handles.pop()
-            logger.info(
-                "New window detected — switching directly to handle: %s",
-                popup_handle,
-            )
+            logger.info("Switching to popup window: %s", popup_handle)
             driver.switch_to.window(popup_handle)
-            logger.info(
-                "Switched to popup window (title='%s', URL: %s)",
-                driver.title,
-                driver.current_url,
-            )
+            logger.info("Switched to popup (title='%s')", driver.title)
         else:
-            # No new window — XML is inline in the current frame or a new iframe
-            logger.info(
-                "No new window opened — looking for inline XML or new iframe"
-            )
-            # Check if a new iframe appeared inside the current frame
+            logger.info("No new window — checking for inline XML or iframe")
             try:
                 new_iframe = WebDriverWait(driver, 5).until(
                     EC.presence_of_element_located(
-                        (By.XPATH, "//iframe[contains(@src,'xml') or contains(@name,'xml') or contains(@id,'xml')]")
+                        (By.XPATH, "//iframe[contains(@src,'xml') or contains(@name,'xml')]")
                     )
                 )
-                logger.info("Found XML iframe, switching into it")
                 driver.switch_to.frame(new_iframe)
                 logger.info("Switched into XML iframe")
             except TimeoutException:
-                logger.info("No XML iframe found — XML should be inline in current frame")
+                logger.info("No XML iframe — XML should be inline")
 
-        # Step 5: Extract the full XML text from the popup.
-        # The popup is a Pega harness — the actual XML is rendered inside
-        # a nested iframe within the popup window. We must:
-        #   1. Wait for the popup page to fully load
-        #   2. Check for nested iframes and switch into the deepest one
-        #   3. Extract text from <pre> or <body>
-        logger.info("Waiting for popup window to fully load")
+        # Wait for popup to load
         _wait_for_page_ready(driver, timeout=30)
-        logger.info(
-            "Popup loaded (title='%s', URL: %s)",
-            driver.title,
-            driver.current_url,
-        )
+        logger.info("Popup loaded (title='%s', URL: %s)", driver.title, driver.current_url)
 
-        # Try to find and switch into any iframe inside the popup
+        # Switch into nested iframes if present
         xml_content = None
         try:
             popup_iframes = driver.find_elements(By.TAG_NAME, "iframe")
             if popup_iframes:
-                logger.info(
-                    "Found %d iframe(s) in popup — switching into first one",
-                    len(popup_iframes),
-                )
+                logger.info("Found %d iframe(s) in popup — switching into first", len(popup_iframes))
                 driver.switch_to.frame(popup_iframes[0])
-                logger.info("Switched into popup iframe")
                 _wait_for_page_ready(driver, timeout=15)
-
-                # Check for another nested iframe
-                nested_iframes = driver.find_elements(By.TAG_NAME, "iframe")
-                if nested_iframes:
-                    logger.info(
-                        "Found %d nested iframe(s) — switching into first nested one",
-                        len(nested_iframes),
-                    )
-                    driver.switch_to.frame(nested_iframes[0])
-                    logger.info("Switched into nested iframe")
+                nested = driver.find_elements(By.TAG_NAME, "iframe")
+                if nested:
+                    logger.info("Found %d nested iframe(s) — switching into first", len(nested))
+                    driver.switch_to.frame(nested[0])
                     _wait_for_page_ready(driver, timeout=15)
-            else:
-                logger.info("No iframes in popup — XML should be directly in popup body")
         except Exception as iframe_exc:
             logger.warning("Could not switch into popup iframe: %s", iframe_exc)
 
-        # Now extract the XML text.
-        # Chrome wraps XML responses in its built-in viewer:
-        #   <div id="webkit-xml-viewer-source-xml">...actual XML...</div>
-        # We must extract the innerHTML of that div to get clean XML.
-        # Fall back to <pre> text, then raw page_source if the div isn't present.
-        logger.info("Extracting XML content from popup")
+        # Extract XML — Chrome wraps it in webkit-xml-viewer-source-xml div
+        logger.info("Extracting XML content")
         try:
-            # Primary: extract raw XML from Chrome's XML viewer div
             raw_xml = driver.execute_script(
                 """
                 var src = document.getElementById('webkit-xml-viewer-source-xml');
@@ -573,42 +653,28 @@ def extract_case_type_xml(
             )
             if raw_xml and raw_xml.strip():
                 xml_content = raw_xml.strip()
-                logger.info(
-                    "Extracted XML via webkit-xml-viewer-source-xml (%d characters)",
-                    len(xml_content),
-                )
+                logger.info("Extracted XML (%d characters)", len(xml_content))
             else:
-                raise ValueError("webkit-xml-viewer div not found or empty")
+                raise ValueError("webkit-xml-viewer div empty")
         except Exception as js_exc:
-            logger.info("JS extraction failed (%s) — falling back to page_source", js_exc)
+            logger.info("JS extraction failed (%s) — using page_source", js_exc)
             try:
                 page_src = driver.page_source
-                if page_src and len(page_src.strip()) > 0:
+                if page_src and page_src.strip():
                     xml_content = page_src
-                    logger.info(
-                        "Extracted XML from page_source (%d characters)",
-                        len(xml_content),
-                    )
+                    logger.info("Extracted XML from page_source (%d characters)", len(xml_content))
                 else:
                     body = driver.find_element(By.TAG_NAME, "body")
                     xml_content = body.text
-                    logger.info(
-                        "Extracted XML from <body> text (%d characters)",
-                        len(xml_content),
-                    )
+                    logger.info("Extracted XML from body (%d characters)", len(xml_content))
             except Exception as body_exc:
-                logger.error("Could not extract XML content: %s", body_exc)
+                logger.error("Could not extract XML: %s", body_exc)
                 xml_content = None
 
-        if not xml_content or len(xml_content.strip()) == 0:
-            logger.warning(
-                "XML content for Case Type '%s' is empty after all extraction attempts",
-                case_type_name,
-            )
-            # Close popup and return None
+        if not xml_content or not xml_content.strip():
+            logger.warning("XML empty for Case Type '%s'", case_type_name)
             try:
-                current_handles_check = set(driver.window_handles)
-                if len(current_handles_check) > 1:
+                if len(set(driver.window_handles)) > 1:
                     driver.close()
                     driver.switch_to.window(main_handle)
             except Exception:
@@ -617,78 +683,40 @@ def extract_case_type_xml(
 
         logger.info(
             "Successfully extracted XML for Case Type '%s' (%d characters)",
-            case_type_name,
-            len(xml_content),
+            case_type_name, len(xml_content),
         )
 
-        # Step 6: Close popup if one was opened, or navigate back if inline
+        # Close popup and return to main window
         current_handles_after = set(driver.window_handles)
         if len(current_handles_after) > 1:
-            logger.info(
-                "Closing popup window (handle=%s) and returning to main window",
-                driver.current_window_handle,
-            )
             driver.close()
             driver.switch_to.window(main_handle)
-            logger.info(
-                "Returned to main window (handle=%s) after XML extraction for Case Type '%s'",
-                main_handle,
-                case_type_name,
-            )
+            logger.info("Closed popup, returned to main window")
         else:
-            # Inline — use browser back to return to the rule view
-            logger.info("XML was inline — navigating back to rule view")
             try:
                 driver.back()
                 _wait_for_page_ready(driver, timeout=30)
-                logger.info("Navigated back to rule view")
+                logger.info("Navigated back (inline XML)")
             except Exception as back_exc:
                 logger.warning("Could not navigate back: %s", back_exc)
 
         return xml_content
 
     except TimeoutException as exc:
-        logger.error(
-            "Timeout during Actions → View XML for Case Type '%s': %s",
-            case_type_name,
-            exc,
-        )
+        logger.error("Timeout during View XML for '%s': %s", case_type_name, exc)
         capture_screenshot(driver, output_dir, f"view_xml_timeout_{case_type_name}")
-        # Attempt recovery — close any stray popup, return to main window
         try:
-            current_handles = set(driver.window_handles)
-            if len(current_handles) > 1:
-                driver.close()
-                driver.switch_to.window(main_handle)
-                logger.info("Recovery: closed stray popup window")
-        except Exception:
-            pass
-        return None
-    except TimeoutError as exc:
-        logger.error(
-            "XML popup did not open for Case Type '%s': %s",
-            case_type_name,
-            exc,
-        )
-        capture_screenshot(driver, output_dir, f"view_xml_popup_timeout_{case_type_name}")
-        try:
-            current_handles = set(driver.window_handles)
-            if len(current_handles) > 1:
+            if len(set(driver.window_handles)) > 1:
                 driver.close()
                 driver.switch_to.window(main_handle)
         except Exception:
             pass
         return None
     except Exception as exc:
-        logger.error(
-            "Unexpected error during Actions → View XML for Case Type '%s': %s",
-            case_type_name,
-            exc,
-        )
+        logger.error("Error during View XML for '%s': %s", case_type_name, exc)
         capture_screenshot(driver, output_dir, f"view_xml_error_{case_type_name}")
         try:
-            current_handles = set(driver.window_handles)
-            if len(current_handles) > 1:
+            if len(set(driver.window_handles)) > 1:
                 driver.close()
                 driver.switch_to.window(main_handle)
         except Exception:
