@@ -35,7 +35,7 @@ cd pega-rule-xml
 # Create and activate a virtual environment
 python3 -m venv venv
 source venv/bin/activate        # macOS / Linux
-# venv_mac\Scripts\activate         # Windows
+# venv\Scripts\activate         # Windows
 
 # Install dependencies
 pip install -r requirements.txt
