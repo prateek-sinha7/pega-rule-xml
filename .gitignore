@@ -19,7 +19,7 @@ build/
 *.egg
 
 # Environment variables — never commit credentials
-#.env
+.env
 
 # IDE / editor
 .idea/
