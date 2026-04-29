@@ -1,6 +1,12 @@
 # Virtual environments
 venv/
+venv_mac/
 .venv/
+env/
+ENV/
+
+# Kiro IDE workspace files
+.kiro/
 
 # Output directory (downloaded XMLs, logs, screenshots)
 xml_output/
