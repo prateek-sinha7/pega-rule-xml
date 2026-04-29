@@ -7,8 +7,7 @@ Uses stable element locators and explicit waits throughout.
 
 import logging
 import time
-from dataclasses import dataclass
-from typing import List, Optional
+from typing import Optional
 
 from selenium.common.exceptions import (
     NoSuchElementException,
@@ -29,74 +28,58 @@ logger = logging.getLogger(__name__)
 
 
 def _wait_for_mask_to_clear(driver: Chrome, timeout: int = 30) -> None:
-    """Wait for Pega's UI loading mask to disappear before interacting.
-
-    Pega shows a semi-transparent overlay (div#pega_ui_mask) during page
-    transitions and AJAX loads. Clicking elements while this mask is active
-    causes ElementClickInterceptedException.
-
-    Args:
-        driver: The active Chrome WebDriver instance.
-        timeout: Maximum seconds to wait for the mask to clear.
-    """
+    """Wait for Pega's UI loading mask to disappear before interacting."""
     try:
         WebDriverWait(driver, timeout).until(
-            EC.invisibility_of_element_located(
-                (By.ID, "pega_ui_mask")
-            )
+            EC.invisibility_of_element_located((By.ID, "pega_ui_mask"))
         )
-        logger.info("Pega UI mask cleared")
+        logger.debug("Pega UI mask cleared")
     except TimeoutException:
         logger.warning(
             "Pega UI mask did not clear within %d seconds — proceeding anyway",
             timeout,
         )
     except NoSuchElementException:
-        # Mask element doesn't exist at all — nothing to wait for
-        pass
+        pass  # Mask doesn't exist — nothing to wait for
 
 
 def _wait_for_page_ready(driver: Chrome, timeout: int = 30) -> None:
     """Wait for the Pega page to fully load and settle.
 
-    Combines multiple checks:
-    1. Wait for document.readyState to be 'complete'
-    2. Wait for the Pega UI mask to disappear
-    3. Wait for any active AJAX/fetch requests to finish
-    4. Brief settle time for Pega's client-side rendering
-
-    Args:
-        driver: The active Chrome WebDriver instance.
-        timeout: Maximum seconds to wait for the page to be ready.
+    Checks:
+    1. document.readyState == 'complete'
+    2. Pega UI mask gone
+    3. jQuery AJAX idle (if present)
+    4. Short settle pause (0.5s) for client-side rendering
     """
-    # 1. Wait for document.readyState == 'complete'
+    # 1. document.readyState
     try:
         WebDriverWait(driver, timeout).until(
             lambda d: d.execute_script("return document.readyState") == "complete"
         )
-        logger.info("Document readyState is 'complete'")
+        logger.debug("Document readyState is 'complete'")
     except TimeoutException:
         logger.warning("Document readyState did not reach 'complete' within %ds", timeout)
 
-    # 2. Wait for the Pega UI mask to disappear
+    # 2. Pega UI mask
     _wait_for_mask_to_clear(driver, timeout)
 
-    # 3. Wait for jQuery/Pega AJAX to settle (if jQuery is present)
+    # 3. jQuery AJAX idle
     try:
         WebDriverWait(driver, 10).until(
             lambda d: d.execute_script(
                 "return (typeof jQuery === 'undefined' || jQuery.active === 0)"
             )
         )
-        logger.info("No active AJAX requests")
+        logger.debug("No active AJAX requests")
     except TimeoutException:
         logger.warning("AJAX requests did not settle within 10s")
     except Exception:
-        pass  # jQuery not available or script error — skip
+        pass
 
-    # 4. Brief settle time for Pega's client-side rendering to finish
-    time.sleep(2)
-    logger.info("Page ready after settle wait")
+    # 4. Minimal settle pause — 0.5s instead of 2s
+    time.sleep(0.5)
+    logger.debug("Page ready")
 
 
 class NavigationError(Exception):
@@ -104,22 +87,6 @@ class NavigationError(Exception):
 
     pass
 
-
-@dataclass
-class RuleRef:
-    """Reference to a discovered rule within a stage.
-
-    Attributes:
-        name: Display name of the rule.
-        stage_name: Name of the parent stage.
-        locator: CSS selector or XPath to re-locate the rule element.
-        index: Position index within the stage's rule list.
-    """
-
-    name: str
-    stage_name: str
-    locator: str
-    index: int
 
 
 def navigate_to_case_type(
@@ -272,7 +239,6 @@ def navigate_to_case_type(
             driver.title,
         )
 
-        _wait_for_page_ready(driver)
     except TimeoutException as exc:
         logger.error("Failed to navigate to Case Types section within timeout")
         capture_screenshot(driver, output_dir, "case_types_navigation")
@@ -412,321 +378,33 @@ def navigate_to_case_type(
         ) from exc
 
 
-def discover_stages(driver: Chrome, stage_list: List[str]) -> List[str]:
-    """Identify which stages from stage_list are present in the Case Type detail view.
-
-    Searches the current page for each stage name in the provided list.
-    Logs WARNING for any stage not found, INFO with count of discovered stages.
-
-    Args:
-        driver: The active Chrome WebDriver instance positioned on the
-            Case Type detail view.
-        stage_list: Ordered list of stage names to look for.
-
-    Returns:
-        List of stage names that were found in the detail view,
-        preserving the order from stage_list.
-    """
-    logger.info("Navigating to Stages section within Case Type detail view")
-    found_processes: List[str] = []
-
-    # Wait for the page to be fully loaded
-    _wait_for_page_ready(driver)
-
-    # Click the "Stages" tab to show the stages/processes view
-    # The tabs are: Processes | Calculations | Stages | Attachment categories | etc.
-    # The tab might be an <a> inside a tab list structure
-    try:
-        # First dump ALL tab-like elements for debugging
-        try:
-            tabs_html = driver.execute_script(
-                """
-                var results = [];
-                // Search for any tab-like elements
-                var allEls = document.querySelectorAll('a, li[role="tab"], [role="tab"], .tab-title');
-                for (var i = 0; i < allEls.length; i++) {
-                    var txt = allEls[i].textContent.trim();
-                    if (txt.length > 0 && txt.length < 30) {
-                        results.push('<' + allEls[i].tagName + ' class="' + (allEls[i].className || '').substring(0, 40) + 
-                            '" href="' + (allEls[i].getAttribute('href') || '') + '">' + txt + '</' + allEls[i].tagName + '>');
-                    }
-                    if (results.length > 30) break;
-                }
-                // Also check for iframes
-                var iframes = document.querySelectorAll('iframe');
-                for (var j = 0; j < iframes.length; j++) {
-                    results.push('IFRAME: id=' + (iframes[j].id || '') + ' name=' + (iframes[j].name || ''));
-                }
-                return results.join('\\n');
-                """
-            )
-            logger.info("Elements in current frame:\n%s", tabs_html)
-        except Exception:
-            pass
-
-        stages_tab = WebDriverWait(driver, 15).until(
-            EC.presence_of_element_located(
-                (By.XPATH,
-                 "//div[contains(@class,'header') and normalize-space(.)='Stages'] | "
-                 "//a[normalize-space(.)='Stages'] | "
-                 "//li//a[normalize-space(.)='Stages']")
-            )
-        )
-        logger.info("Found 'Stages' tab, JS-clicking it")
-        driver.execute_script("arguments[0].click();", stages_tab)
-        logger.info("Clicked 'Stages' tab")
-        _wait_for_page_ready(driver)
-    except TimeoutException:
-        logger.warning("Stages tab not found — may already be active or different tab structure")
-
-    # Dynamically discover ALL process/stage names from the Stages section.
-    # Process names are in <input type="text"> elements with:
-    #   name="$PRH_1$ppyStages$l{index}$ppyStageName"
-    #   data-test-id="20141106145911015114570"
-    #   value="Program Design" (the process name)
-    # IMPORTANT: Only READ values — never click edit/delete/add buttons.
-    try:
-        process_names = driver.execute_script(
-            """
-            var results = [];
-            var seen = {};
-            // Find all stage name input fields
-            var inputs = document.querySelectorAll('input[name*="ppyStageName"]');
-            for (var i = 0; i < inputs.length; i++) {
-                var val = inputs[i].value.trim();
-                if (val && !seen[val]) {
-                    seen[val] = true;
-                    results.push(val);
-                }
-            }
-            // Fallback: find inputs with data-test-id="20141106145911015114570"
-            if (results.length === 0) {
-                var inputs2 = document.querySelectorAll('input[data-test-id="20141106145911015114570"]');
-                for (var j = 0; j < inputs2.length; j++) {
-                    var v = inputs2[j].value.trim();
-                    if (v && !seen[v]) {
-                        seen[v] = true;
-                        results.push(v);
-                    }
-                }
-            }
-            return results;
-            """
-        )
-        if process_names:
-            found_processes = process_names
-            logger.info("Dynamically discovered %d processes: %s", len(found_processes), found_processes)
-        else:
-            logger.warning("No processes found dynamically, falling back to stage_list config")
-            # Fall back to configured stage_list
-            for stage_name in stage_list:
-                try:
-                    WebDriverWait(driver, 5).until(
-                        EC.presence_of_element_located(
-                            (By.XPATH, f"//*[contains(text(),'{stage_name}')]")
-                        )
-                    )
-                    found_processes.append(stage_name)
-                    logger.info("Found configured process '%s'", stage_name)
-                except (TimeoutException, NoSuchElementException):
-                    logger.warning("Process '%s' not found — skipping", stage_name)
-    except Exception as e:
-        logger.error("Error discovering processes: %s", e)
-        # Fall back to configured stage_list
-        for stage_name in stage_list:
-            try:
-                WebDriverWait(driver, 5).until(
-                    EC.presence_of_element_located(
-                        (By.XPATH, f"//*[contains(text(),'{stage_name}')]")
-                    )
-                )
-                found_processes.append(stage_name)
-            except (TimeoutException, NoSuchElementException):
-                pass
-
-    logger.info(
-        "Discovered %d processes to extract: %s",
-        len(found_processes),
-        found_processes,
-    )
-    return found_processes
-
-
-def discover_rules(driver: Chrome, stage_name: str) -> List[RuleRef]:
-    """Open/expand a stage and collect ALL rule references before returning.
-
-    Uses the collect-then-process pattern: discovers every rule in the stage
-    and builds the complete list before returning. Supports discovery of
-    1000+ rules without memory issues by storing only lightweight RuleRef
-    objects.
-
-    Args:
-        driver: The active Chrome WebDriver instance positioned on the
-            Case Type detail view.
-        stage_name: The name of the stage to expand and discover rules in.
-
-    Returns:
-        List of RuleRef objects representing all rules found in the stage.
-    """
-    logger.info("Opening stage '%s' to discover rules", stage_name)
-    wait = WebDriverWait(driver, 15)
-
-    # Wait for the page to be ready before interacting
-    _wait_for_page_ready(driver)
-
-    # Click/expand the stage to reveal its rules
-    try:
-        stage_element = wait.until(
-            EC.element_to_be_clickable(
-                (
-                    By.XPATH,
-                    f"//*[contains(@class,'stage') and contains(text(),'{stage_name}')] | "
-                    f"//span[text()='{stage_name}'] | "
-                    f"//div[text()='{stage_name}'] | "
-                    f"//a[text()='{stage_name}'] | "
-                    f"//td[text()='{stage_name}'] | "
-                    f"//*[@data-test-id and contains(text(),'{stage_name}')]",
-                )
-            )
-        )
-        stage_element.click()
-        logger.info("Clicked stage '%s' to expand/open it", stage_name)
-    except TimeoutException:
-        logger.warning(
-            "Could not click stage '%s' — it may already be expanded",
-            stage_name,
-        )
-
-    # Dump the DOM around the stage area for debugging
-    try:
-        rules_html = driver.execute_script(
-            """
-            var stageName = arguments[0];
-            var results = [];
-            // Find elements containing the stage name
-            var xpath = "//*[contains(text(),'" + stageName + "')]";
-            var stageEls = document.evaluate(xpath, document, null, XPathResult.ORDERED_NODE_SNAPSHOT_TYPE, null);
-            for (var i = 0; i < Math.min(stageEls.snapshotLength, 3); i++) {
-                var el = stageEls.snapshotItem(i);
-                var container = el;
-                for (var j = 0; j < 3 && container.parentElement; j++) {
-                    container = container.parentElement;
-                }
-                results.push('--- Stage container ' + i + ' ---');
-                results.push(container.outerHTML.substring(0, 2000));
-            }
-            // Look for elements with flow/process/step in class or data-test-id
-            var flowEls = document.querySelectorAll(
-                '[class*="flow"], [class*="Flow"], [class*="process"], [class*="Process"], ' +
-                '[class*="step"], [class*="Step"], [data-test-id*="flow"], [data-test-id*="step"], ' +
-                '[data-test-id*="process"], [data-test-id*="assignment"]'
-            );
-            if (flowEls.length > 0) {
-                results.push('--- Flow/Process/Step elements (' + flowEls.length + ' found) ---');
-                for (var k = 0; k < Math.min(flowEls.length, 5); k++) {
-                    results.push(flowEls[k].outerHTML.substring(0, 500));
-                }
-            }
-            return results.join('\\n');
-            """,
-            stage_name,
-        )
-        logger.info("Rules/flow DOM context for stage '%s':\n%s", stage_name, rules_html)
-    except Exception as debug_exc:
-        logger.warning("Could not extract rules DOM context: %s", debug_exc)
-
-    # Wait for the page to settle
-    _wait_for_page_ready(driver)
-
-    # Collect all rule elements - use broad selector strategies
-    # including Pega-specific patterns from the grid table structure
-    rule_elements = driver.find_elements(
-        By.XPATH,
-        "//tr[contains(@class,'rule')] | "
-        "//div[contains(@class,'rule-item') or contains(@class,'rule-list-item')] | "
-        "//li[contains(@class,'rule')] | "
-        "//table[contains(@class,'rule')]//tr[td] | "
-        "//*[@data-test-id][contains(@class,'list-item')] | "
-        "//div[contains(@class,'flow-item')] | "
-        "//a[contains(@class,'rule-link')] | "
-        "//div[contains(@class,'flow')] | "
-        "//tr[@data-test-id and @role='row']//a",
-    )
-
-    # Build the list of RuleRef objects
-    rules: List[RuleRef] = []
-    seen_names: set = set()
-
-    for index, element in enumerate(rule_elements):
-        try:
-            # Extract the rule name from the element text
-            rule_name = element.text.strip()
-            if not rule_name:
-                # Try to get text from child elements
-                name_el = element.find_elements(By.XPATH, ".//a | .//span | .//td[1]")
-                if name_el:
-                    rule_name = name_el[0].text.strip()
-
-            if not rule_name or rule_name in seen_names:
-                continue
-
-            seen_names.add(rule_name)
-
-            # Build a stable locator for re-finding this element later
-            # Prefer data-test-id, then text-based XPath
-            data_test_id = element.get_attribute("data-test-id")
-            if data_test_id:
-                locator = f"//*[@data-test-id='{data_test_id}']"
-            else:
-                # Use text-based XPath as the locator
-                locator = f"//*[contains(text(),'{rule_name}')]"
-
-            rule_ref = RuleRef(
-                name=rule_name,
-                stage_name=stage_name,
-                locator=locator,
-                index=index,
-            )
-            rules.append(rule_ref)
-        except Exception as exc:
-            logger.warning(
-                "Failed to extract rule info from element at index %d in stage '%s': %s",
-                index,
-                stage_name,
-                exc,
-            )
-            continue
-
-    logger.info(
-        "Discovered %d rules in stage '%s'",
-        len(rules),
-        stage_name,
-    )
-    return rules
-
-
-def extract_stage_xml(
-    driver: Chrome, stage_name: str, stage_index: int, case_type_name: str
+def extract_case_type_xml(
+    driver: Chrome,
+    case_type_name: str,
+    output_dir: str = "output",
 ) -> Optional[str]:
-    """Extract XML for a stage by clicking it, then Actions → View XML.
+    """Extract XML for the currently open Case Type rule view.
 
-    The driver must already be inside the PegaGadget iframe with the Stages
-    view visible. For stage_index == 0 the first stage is already selected;
-    for subsequent stages the stage element is clicked first.
+    Called immediately after navigate_to_case_type() has opened the rule-level
+    view via Actions → Open. This function simply clicks Actions → View XML on
+    that page, switches to the popup, extracts the XML, closes the popup, and
+    returns the content.
+
+    No stage tab navigation or per-stage looping is performed.
 
     Steps:
-    1. If stage_index > 0: click the stage element to select it.
+    1. Wait for the page to settle inside the PegaGadget iframe.
     2. Click the "Actions" toolbar button.
-    3. Click "View XML" in the dropdown menu.
-    4. Switch to the popup window that opens.
-    5. Extract XML text from the popup (<pre> or <body>).
-    6. Close popup and return to main window.
+    3. Click "View XML" in the dropdown.
+    4. Switch to the XML popup window.
+    5. Extract the full XML text from the popup (<pre> or <body>).
+    6. Close the popup and return to the main window.
 
     Args:
-        driver: The active Chrome WebDriver instance (inside PegaGadget iframe).
-        stage_name: Display name of the stage.
-        stage_index: 0-based index of the stage in the stages list.
-        case_type_name: Name of the Case Type (for logging).
+        driver: The active Chrome WebDriver instance, already inside the
+            PegaGadget iframe with the Case Type rule view loaded.
+        case_type_name: Name of the Case Type (used for logging only).
+        output_dir: Directory for screenshots on failure.
 
     Returns:
         The XML content string, or None if extraction fails.
@@ -735,36 +413,22 @@ def extract_stage_xml(
     main_handle = driver.window_handles[0]
 
     logger.info(
-        "Extracting XML for stage '%s' (index=%d) in Case Type '%s'",
-        stage_name,
-        stage_index,
+        "Starting Actions → View XML extraction for Case Type '%s'",
         case_type_name,
+    )
+    logger.info(
+        "Current page state — URL: %s, title='%s'",
+        driver.current_url,
+        driver.title,
     )
 
     try:
-        # Step 1: If not the first stage, click the stage element to select it
-        if stage_index > 0:
-            logger.info("Clicking stage '%s' to select it", stage_name)
-            # The stage name is in an <input> with name containing "ppyStageName"
-            # and value matching the stage name. Click the input to select the row.
-            stage_element = wait.until(
-                EC.presence_of_element_located(
-                    (
-                        By.XPATH,
-                        f"//input[contains(@name,'ppyStageName') and @value='{stage_name}'] | "
-                        f"//input[@data-test-id='20141106145911015114570' and @value='{stage_name}'] | "
-                        f"//a[@title='{stage_name}'] | "
-                        f"//a[normalize-space(text())='{stage_name}']",
-                    )
-                )
-            )
-            driver.execute_script("arguments[0].click();", stage_element)
-            logger.info("Clicked stage '%s'", stage_name)
-            # Wait for the page to settle after selecting the stage
-            _wait_for_page_ready(driver)
+        # Step 1: Wait for the page to fully settle
+        _wait_for_page_ready(driver, timeout=60)
+        logger.info("Page settled — ready to click Actions")
 
-        # Step 2: Click the "Actions" toolbar button
-        logger.info("Clicking 'Actions' toolbar button for stage '%s'", stage_name)
+        # Step 2: Find and click the "Actions" toolbar button
+        logger.info("Looking for 'Actions' toolbar button")
         actions_button = wait.until(
             EC.presence_of_element_located(
                 (
@@ -776,15 +440,16 @@ def extract_stage_xml(
                 )
             )
         )
+        logger.info("Found 'Actions' toolbar button, clicking")
         driver.execute_script("arguments[0].click();", actions_button)
-        logger.info("Clicked 'Actions' button for stage '%s'", stage_name)
+        logger.info("Clicked 'Actions' toolbar button")
 
-        # Wait for the dropdown to appear
+        # Wait for the dropdown to render
         _wait_for_mask_to_clear(driver)
         time.sleep(1)  # Brief pause for dropdown animation
 
-        # Step 3: Click "View XML" in the dropdown
-        logger.info("Looking for 'View XML' in Actions dropdown for stage '%s'", stage_name)
+        # Step 3: Find and click "View XML" in the dropdown
+        logger.info("Looking for 'View XML' in Actions dropdown")
         view_xml_item = wait.until(
             EC.presence_of_element_located(
                 (
@@ -800,116 +465,234 @@ def extract_stage_xml(
         )
         logger.info("Found 'View XML' menu item, clicking")
         driver.execute_script("arguments[0].click();", view_xml_item)
-        logger.info("Clicked 'View XML' for stage '%s'", stage_name)
+        logger.info("Clicked 'View XML' — waiting for popup window")
 
-        # Step 4: Switch to the popup window
-        logger.info("Waiting for XML popup window for stage '%s'", stage_name)
-        switch_to_popup(driver, timeout=20)
-        logger.info("Switched to XML popup window for stage '%s'", stage_name)
+        # Step 4: Wait for XML to appear — check if a new window opened.
+        # Give Pega 3 seconds to react to the View XML click.
+        logger.info("Waiting briefly for Pega to react to 'View XML' click")
+        time.sleep(3)
 
-        # Step 5: Extract XML text from the popup
-        logger.info("Extracting XML content from popup for stage '%s'", stage_name)
-        xml_element = WebDriverWait(driver, 15).until(
-            EC.presence_of_element_located(
-                (By.XPATH, "//pre | //body")
-            )
-        )
-        xml_content = xml_element.text
+        current_handles = set(driver.window_handles)
         logger.info(
-            "Extracted XML for stage '%s' (%d characters)",
-            stage_name,
+            "Window handles after 'View XML' click: %d handle(s) — %s",
+            len(current_handles),
+            current_handles,
+        )
+
+        if len(current_handles) > 1:
+            # A new window opened — switch directly to it (do NOT call switch_to_popup
+            # which would wait for yet another new window)
+            new_handles = current_handles - {main_handle}
+            popup_handle = new_handles.pop()
+            logger.info(
+                "New window detected — switching directly to handle: %s",
+                popup_handle,
+            )
+            driver.switch_to.window(popup_handle)
+            logger.info(
+                "Switched to popup window (title='%s', URL: %s)",
+                driver.title,
+                driver.current_url,
+            )
+        else:
+            # No new window — XML is inline in the current frame or a new iframe
+            logger.info(
+                "No new window opened — looking for inline XML or new iframe"
+            )
+            # Check if a new iframe appeared inside the current frame
+            try:
+                new_iframe = WebDriverWait(driver, 5).until(
+                    EC.presence_of_element_located(
+                        (By.XPATH, "//iframe[contains(@src,'xml') or contains(@name,'xml') or contains(@id,'xml')]")
+                    )
+                )
+                logger.info("Found XML iframe, switching into it")
+                driver.switch_to.frame(new_iframe)
+                logger.info("Switched into XML iframe")
+            except TimeoutException:
+                logger.info("No XML iframe found — XML should be inline in current frame")
+
+        # Step 5: Extract the full XML text from the popup.
+        # The popup is a Pega harness — the actual XML is rendered inside
+        # a nested iframe within the popup window. We must:
+        #   1. Wait for the popup page to fully load
+        #   2. Check for nested iframes and switch into the deepest one
+        #   3. Extract text from <pre> or <body>
+        logger.info("Waiting for popup window to fully load")
+        _wait_for_page_ready(driver, timeout=30)
+        logger.info(
+            "Popup loaded (title='%s', URL: %s)",
+            driver.title,
+            driver.current_url,
+        )
+
+        # Try to find and switch into any iframe inside the popup
+        xml_content = None
+        try:
+            popup_iframes = driver.find_elements(By.TAG_NAME, "iframe")
+            if popup_iframes:
+                logger.info(
+                    "Found %d iframe(s) in popup — switching into first one",
+                    len(popup_iframes),
+                )
+                driver.switch_to.frame(popup_iframes[0])
+                logger.info("Switched into popup iframe")
+                _wait_for_page_ready(driver, timeout=15)
+
+                # Check for another nested iframe
+                nested_iframes = driver.find_elements(By.TAG_NAME, "iframe")
+                if nested_iframes:
+                    logger.info(
+                        "Found %d nested iframe(s) — switching into first nested one",
+                        len(nested_iframes),
+                    )
+                    driver.switch_to.frame(nested_iframes[0])
+                    logger.info("Switched into nested iframe")
+                    _wait_for_page_ready(driver, timeout=15)
+            else:
+                logger.info("No iframes in popup — XML should be directly in popup body")
+        except Exception as iframe_exc:
+            logger.warning("Could not switch into popup iframe: %s", iframe_exc)
+
+        # Now extract the XML text.
+        # Chrome wraps XML responses in its built-in viewer:
+        #   <div id="webkit-xml-viewer-source-xml">...actual XML...</div>
+        # We must extract the innerHTML of that div to get clean XML.
+        # Fall back to <pre> text, then raw page_source if the div isn't present.
+        logger.info("Extracting XML content from popup")
+        try:
+            # Primary: extract raw XML from Chrome's XML viewer div
+            raw_xml = driver.execute_script(
+                """
+                var src = document.getElementById('webkit-xml-viewer-source-xml');
+                if (src) { return src.innerHTML; }
+                var pre = document.querySelector('pre');
+                if (pre) { return pre.textContent; }
+                return null;
+                """
+            )
+            if raw_xml and raw_xml.strip():
+                xml_content = raw_xml.strip()
+                logger.info(
+                    "Extracted XML via webkit-xml-viewer-source-xml (%d characters)",
+                    len(xml_content),
+                )
+            else:
+                raise ValueError("webkit-xml-viewer div not found or empty")
+        except Exception as js_exc:
+            logger.info("JS extraction failed (%s) — falling back to page_source", js_exc)
+            try:
+                page_src = driver.page_source
+                if page_src and len(page_src.strip()) > 0:
+                    xml_content = page_src
+                    logger.info(
+                        "Extracted XML from page_source (%d characters)",
+                        len(xml_content),
+                    )
+                else:
+                    body = driver.find_element(By.TAG_NAME, "body")
+                    xml_content = body.text
+                    logger.info(
+                        "Extracted XML from <body> text (%d characters)",
+                        len(xml_content),
+                    )
+            except Exception as body_exc:
+                logger.error("Could not extract XML content: %s", body_exc)
+                xml_content = None
+
+        if not xml_content or len(xml_content.strip()) == 0:
+            logger.warning(
+                "XML content for Case Type '%s' is empty after all extraction attempts",
+                case_type_name,
+            )
+            # Close popup and return None
+            try:
+                current_handles_check = set(driver.window_handles)
+                if len(current_handles_check) > 1:
+                    driver.close()
+                    driver.switch_to.window(main_handle)
+            except Exception:
+                pass
+            return None
+
+        logger.info(
+            "Successfully extracted XML for Case Type '%s' (%d characters)",
+            case_type_name,
             len(xml_content),
         )
 
-        # Step 6: Close popup and return to main window
-        logger.info("Closing popup and returning to main window for stage '%s'", stage_name)
-        switch_to_main(driver, main_handle)
-        logger.info("Returned to main window after extracting stage '%s'", stage_name)
-
-        # After returning to main window, we need to switch back into the
-        # PegaGadget iframe since switch_to_main puts us at the top level
-        # Re-enter the Developer iframe then the PegaGadget iframe
-        try:
-            dev_iframe = WebDriverWait(driver, 15).until(
-                EC.presence_of_element_located(
-                    (By.CSS_SELECTOR, "iframe#Developer, iframe[name='Developer']")
-                )
+        # Step 6: Close popup if one was opened, or navigate back if inline
+        current_handles_after = set(driver.window_handles)
+        if len(current_handles_after) > 1:
+            logger.info(
+                "Closing popup window (handle=%s) and returning to main window",
+                driver.current_window_handle,
             )
-            driver.switch_to.frame(dev_iframe)
-            # Switch to the last PegaGadget iframe (the rule view)
-            gadget_iframes = driver.find_elements(
-                By.CSS_SELECTOR, "iframe[id^='PegaGadget'][id$='Ifr']"
+            driver.close()
+            driver.switch_to.window(main_handle)
+            logger.info(
+                "Returned to main window (handle=%s) after XML extraction for Case Type '%s'",
+                main_handle,
+                case_type_name,
             )
-            if gadget_iframes:
-                driver.switch_to.frame(gadget_iframes[-1])
-            logger.info("Re-entered Developer + PegaGadget iframe after popup close")
-        except TimeoutException:
-            logger.warning(
-                "Could not re-enter iframe chain after popup close for stage '%s'",
-                stage_name,
-            )
-
-        if not xml_content or len(xml_content.strip()) == 0:
-            logger.warning("XML content for stage '%s' is empty", stage_name)
-            return None
+        else:
+            # Inline — use browser back to return to the rule view
+            logger.info("XML was inline — navigating back to rule view")
+            try:
+                driver.back()
+                _wait_for_page_ready(driver, timeout=30)
+                logger.info("Navigated back to rule view")
+            except Exception as back_exc:
+                logger.warning("Could not navigate back: %s", back_exc)
 
         return xml_content
 
     except TimeoutException as exc:
         logger.error(
-            "Timeout extracting XML for stage '%s': %s", stage_name, exc
+            "Timeout during Actions → View XML for Case Type '%s': %s",
+            case_type_name,
+            exc,
         )
-        # Try to recover — close any open popup and return to main
-        _safe_recover_from_popup(driver, main_handle)
+        capture_screenshot(driver, output_dir, f"view_xml_timeout_{case_type_name}")
+        # Attempt recovery — close any stray popup, return to main window
+        try:
+            current_handles = set(driver.window_handles)
+            if len(current_handles) > 1:
+                driver.close()
+                driver.switch_to.window(main_handle)
+                logger.info("Recovery: closed stray popup window")
+        except Exception:
+            pass
         return None
     except TimeoutError as exc:
         logger.error(
-            "Popup did not open for stage '%s': %s", stage_name, exc
+            "XML popup did not open for Case Type '%s': %s",
+            case_type_name,
+            exc,
         )
-        _safe_recover_from_popup(driver, main_handle)
+        capture_screenshot(driver, output_dir, f"view_xml_popup_timeout_{case_type_name}")
+        try:
+            current_handles = set(driver.window_handles)
+            if len(current_handles) > 1:
+                driver.close()
+                driver.switch_to.window(main_handle)
+        except Exception:
+            pass
         return None
     except Exception as exc:
         logger.error(
-            "Unexpected error extracting XML for stage '%s': %s", stage_name, exc
+            "Unexpected error during Actions → View XML for Case Type '%s': %s",
+            case_type_name,
+            exc,
         )
-        _safe_recover_from_popup(driver, main_handle)
+        capture_screenshot(driver, output_dir, f"view_xml_error_{case_type_name}")
+        try:
+            current_handles = set(driver.window_handles)
+            if len(current_handles) > 1:
+                driver.close()
+                driver.switch_to.window(main_handle)
+        except Exception:
+            pass
         return None
 
 
-def _safe_recover_from_popup(driver: Chrome, main_handle: str) -> None:
-    """Attempt to close any open popup and return to the PegaGadget iframe.
-
-    Used as a recovery mechanism when extract_stage_xml fails mid-way.
-
-    Args:
-        driver: The active Chrome WebDriver instance.
-        main_handle: The main window handle to return to.
-    """
-    try:
-        current_handle = driver.current_window_handle
-        if current_handle != main_handle:
-            driver.close()
-            driver.switch_to.window(main_handle)
-            logger.info("Recovery: closed popup and returned to main window")
-    except Exception:
-        try:
-            driver.switch_to.window(main_handle)
-        except Exception:
-            pass
-
-    # Try to re-enter the iframe chain (Developer → last PegaGadget)
-    try:
-        dev_iframe = WebDriverWait(driver, 10).until(
-            EC.presence_of_element_located(
-                (By.CSS_SELECTOR, "iframe#Developer, iframe[name='Developer']")
-            )
-        )
-        driver.switch_to.frame(dev_iframe)
-        gadget_iframes = driver.find_elements(
-            By.CSS_SELECTOR, "iframe[id^='PegaGadget'][id$='Ifr']"
-        )
-        if gadget_iframes:
-            driver.switch_to.frame(gadget_iframes[-1])
-        logger.info("Recovery: re-entered Developer + PegaGadget iframe")
-    except Exception:
-        logger.warning("Recovery: could not re-enter iframe chain")

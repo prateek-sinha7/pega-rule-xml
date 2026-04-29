@@ -9,8 +9,8 @@ import logging
 import os
 import re
 import sys
-from dataclasses import dataclass, field
-from typing import Dict, List, Optional
+from dataclasses import dataclass
+from typing import Dict, Optional
 
 from dotenv import load_dotenv
 
@@ -28,8 +28,6 @@ class AppConfig:
         output_dir: Directory for all output files. Default: "output".
         headless: Run Chrome in headless mode. Default: True.
         max_retries: Max retry attempts per rule extraction. Default: 3.
-        stage_list: Ordered list of Case Type stages to process.
-            Default: ["Initialization", "Primary", "Alternatives"].
         parallel_workers: Number of concurrent browser sessions. Default: 1.
         log_level: Python logging level string. Default: "INFO".
         case_type_name: Target Case Type name. Default: "Tax Compliance Training".
@@ -41,18 +39,14 @@ class AppConfig:
     output_dir: str = "output"
     headless: bool = True
     max_retries: int = 3
-    stage_list: List[str] = field(
-        default_factory=lambda: ["Initialization", "Primary", "Alternatives"]
-    )
     parallel_workers: int = 1
     log_level: str = "INFO"
     case_type_name: str = "Tax Compliance Training"
 
-
 def parse_cli_args() -> Dict[str, object]:
     """Parse CLI arguments using argparse.
 
-    Supports --url, --output-dir, --headless, --max-retries, --stages.
+    Supports --url, --output-dir, --headless, --max-retries, --case-type.
     Returns a dict containing only the arguments that were explicitly provided
     by the user (omits arguments left at their default/None).
     """
@@ -81,9 +75,9 @@ def parse_cli_args() -> Dict[str, object]:
         help="Max retry attempts per rule extraction (default: 3)",
     )
     parser.add_argument(
-        "--stages",
-        dest="stage_list",
-        help="Comma-separated list of stages to process",
+        "--case-type",
+        dest="case_type_name",
+        help='Name of the Case Type to open in Dev Studio (e.g. "Tax Compliance Training")',
     )
 
     args = parser.parse_args()
@@ -98,8 +92,8 @@ def parse_cli_args() -> Dict[str, object]:
         result["headless"] = args.headless
     if args.max_retries is not None:
         result["max_retries"] = args.max_retries
-    if args.stage_list is not None:
-        result["stage_list"] = args.stage_list
+    if args.case_type_name is not None:
+        result["case_type_name"] = args.case_type_name
 
     return result
 
@@ -175,20 +169,6 @@ def load_config(cli_args: Optional[Dict[str, object]] = None) -> AppConfig:
     else:
         max_retries = 3
 
-    # --- Resolve stage_list ---
-    if "stage_list" in cli_args:
-        stage_raw = cli_args["stage_list"]
-        if isinstance(stage_raw, list):
-            stage_list = stage_raw
-        else:
-            stage_list = [s.strip() for s in str(stage_raw).split(",") if s.strip()]
-    elif os.environ.get("STAGE_LIST"):
-        stage_list = [
-            s.strip() for s in os.environ["STAGE_LIST"].split(",") if s.strip()
-        ]
-    else:
-        stage_list = ["Initialization", "Primary", "Alternatives"]
-
     # --- Resolve parallel_workers ---
     if os.environ.get("PARALLEL_WORKERS"):
         parallel_workers = int(os.environ["PARALLEL_WORKERS"])
@@ -201,8 +181,22 @@ def load_config(cli_args: Optional[Dict[str, object]] = None) -> AppConfig:
     else:
         log_level = "INFO"
 
-    # --- Case type name (hardcoded default, no env/CLI override) ---
-    case_type_name = "Tax Compliance Training"
+    # --- Resolve case_type_name ---
+    if "case_type_name" in cli_args:
+        case_type_name = str(cli_args["case_type_name"]).strip()
+    elif os.environ.get("CASE_TYPE_NAME"):
+        case_type_name = os.environ["CASE_TYPE_NAME"].strip()
+    else:
+        case_type_name = "Tax Compliance Training"
+
+    if not case_type_name:
+        logger.error(
+            "CASE_TYPE_NAME is empty. Provide it via --case-type CLI arg or "
+            "CASE_TYPE_NAME environment variable."
+        )
+        sys.exit(1)
+
+    logger.debug("Resolved case_type_name='%s'", case_type_name)
 
     return AppConfig(
         pega_url=pega_url,
@@ -211,7 +205,6 @@ def load_config(cli_args: Optional[Dict[str, object]] = None) -> AppConfig:
         output_dir=output_dir,
         headless=headless,
         max_retries=max_retries,
-        stage_list=stage_list,
         parallel_workers=parallel_workers,
         log_level=log_level,
         case_type_name=case_type_name,

@@ -43,6 +43,12 @@ def create_driver(config: AppConfig) -> webdriver.Chrome:
         chrome_options.add_argument("--no-sandbox")
         chrome_options.add_argument("--disable-dev-shm-usage")
         chrome_options.add_argument("--disable-gpu")
+        # Performance: disable unnecessary Chrome features
+        chrome_options.add_argument("--disable-extensions")
+        chrome_options.add_argument("--disable-infobars")
+        chrome_options.add_argument("--disable-notifications")
+        chrome_options.add_argument("--blink-settings=imagesEnabled=false")  # skip image loading
+        chrome_options.add_experimental_option("excludeSwitches", ["enable-logging"])
 
         driver = webdriver.Chrome(options=chrome_options)
         driver.set_page_load_timeout(60)

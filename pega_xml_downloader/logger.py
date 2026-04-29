@@ -36,6 +36,10 @@ def setup_logging(log_level: str, output_dir: str) -> logging.Logger:
     logger = logging.getLogger()
     logger.setLevel(numeric_level)
 
+    # Guard against duplicate handlers if setup_logging is called more than once
+    if logger.handlers:
+        logger.handlers.clear()
+
     # Define the shared format
     formatter = logging.Formatter(
         "%(asctime)s - %(levelname)s - %(name)s - %(message)s"

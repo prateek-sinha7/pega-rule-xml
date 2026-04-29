@@ -1,0 +1,39 @@
+# Virtual environments
+venv/
+.venv/
+
+# Output directory (downloaded XMLs, logs, screenshots)
+xml_output/
+output/
+
+# Python bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+
+# Distribution / packaging
+dist/
+build/
+*.egg-info/
+*.egg
+
+# Environment variables — never commit credentials
+#.env
+
+# IDE / editor
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# macOS
+.DS_Store
+
+# Pytest / coverage
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Logs
+*.log

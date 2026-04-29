@@ -1,131 +1,198 @@
 # Pega XML Downloader
 
-Automated extraction of rule XML definitions from the Pega Platform UI using Selenium WebDriver. The tool drives a Chrome browser session through Pega Dev Studio, systematically discovering and downloading XML for every rule across all configured stages of a target Case Type.
+A Python automation script that logs into the Pega Platform UI using Selenium, navigates to a specified Case Type in Dev Studio, and downloads its XML definition via **Actions → Open → Actions → View XML**.
+
+## How It Works
+
+The script follows the exact same steps a developer would take manually:
+
+1. Login to Pega
+2. Switch to Dev Studio
+3. Navigate to Case Types
+4. Locate the target Case Type
+5. Click **Actions → Open**
+6. Click **Actions → View XML**
+7. Extract the XML from the popup window
+8. Save it as `{CaseTypeName}_{YYYYMMDD_HHMMSS}.xml`
+
+---
 
 ## Prerequisites
 
 - **Python 3.10+**
-- **Google Chrome** (latest stable version)
-- **ChromeDriver** matching your installed Chrome version ([download](https://chromedriver.chromium.org/downloads))
+- **Google Chrome** (latest stable)
+- **ChromeDriver** is managed automatically by Selenium 4.6+ — no manual download needed
 
-Ensure `chromedriver` is available on your system PATH or in the project directory.
+---
 
 ## Installation
 
 ```bash
 # Clone the repository
-git clone <repository-url>
-cd pega-xml-downloader
+git clone https://github.com/prateek-sinha7/pega-rule-xml.git
+cd pega-rule-xml
 
 # Create and activate a virtual environment
-python -m venv venv
-source venv/bin/activate  # Linux/macOS
-# venv\Scripts\activate   # Windows
+python3 -m venv venv
+source venv_mac/bin/activate        # macOS / Linux
+# venv_mac\Scripts\activate         # Windows
 
 # Install dependencies
 pip install -r requirements.txt
 
-# Configure environment
+# Set up your environment file
 cp .env.example .env
 # Edit .env with your Pega credentials and settings
 ```
 
+---
+
 ## Configuration
+
+All settings can be provided via `.env` file, environment variables, or CLI arguments.
+
+**Precedence (highest to lowest):** CLI args → environment variables → `.env` file → defaults
 
 ### Environment Variables
 
-All configuration can be set via a `.env` file or environment variables. CLI arguments take precedence over environment variables.
-
 | Variable | Required | Default | Description |
-|----------|----------|---------|-------------|
-| `PEGA_URL` | Yes | — | Base URL of the Pega Platform instance (e.g., `https://pega.example.com/prweb`) |
+|---|---|---|---|
+| `PEGA_URL` | Yes | — | Full URL of the Pega login page |
 | `PEGA_USERNAME` | Yes | — | Pega login username |
 | `PEGA_PASSWORD` | Yes | — | Pega login password |
+| `CASE_TYPE_NAME` | No | `Tax Compliance Training` | Name of the Case Type to open in Dev Studio |
 | `OUTPUT_DIR` | No | `output` | Directory where XML files, logs, and screenshots are saved |
-| `HEADLESS` | No | `true` | Run Chrome in headless mode (`true`/`false`) |
-| `MAX_RETRIES` | No | `3` | Maximum retry attempts per rule extraction before marking as failed |
-| `STAGE_LIST` | No | `Initialization,Primary,Alternatives` | Comma-separated list of Case Type stages to process (in order) |
-| `PARALLEL_WORKERS` | No | `1` | Number of concurrent browser sessions (`1` = sequential) |
-| `LOG_LEVEL` | No | `INFO` | Python logging level (`DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL`) |
+| `HEADLESS` | No | `true` | Run Chrome without a visible window (`true`/`false`) |
+| `MAX_RETRIES` | No | `3` | Retry attempts before marking an extraction as failed |
+| `PARALLEL_WORKERS` | No | `1` | Number of concurrent browser sessions (keep at `1` for stability) |
+| `LOG_LEVEL` | No | `INFO` | Logging verbosity (`DEBUG`, `INFO`, `WARNING`, `ERROR`) |
 
 ### CLI Arguments
 
 | Argument | Overrides | Description |
-|----------|-----------|-------------|
-| `--url` | `PEGA_URL` | Base URL of the Pega Platform instance |
-| `--output-dir` | `OUTPUT_DIR` | Directory for output files |
-| `--headless` | `HEADLESS` | Run Chrome in headless mode (`true`/`false`) |
-| `--max-retries` | `MAX_RETRIES` | Max retry attempts per rule extraction |
-| `--stages` | `STAGE_LIST` | Comma-separated list of stages to process |
+|---|---|---|
+| `--url` | `PEGA_URL` | Pega login page URL |
+| `--case-type` | `CASE_TYPE_NAME` | Case Type name to download |
+| `--output-dir` | `OUTPUT_DIR` | Output directory path |
+| `--headless` | `HEADLESS` | Headless mode (`true`/`false`) |
+| `--max-retries` | `MAX_RETRIES` | Max retry attempts |
 
-### Configuration Precedence
-
-Settings are resolved in the following order (highest priority first):
-
-1. CLI arguments
-2. Environment variables
-3. `.env` file
-4. Built-in defaults
+---
 
 ## Usage
 
-### Basic Usage
-
-Run with settings from your `.env` file:
+### Basic — uses settings from `.env`
 
 ```bash
 python -m pega_xml_downloader
 ```
 
-### With CLI Overrides
-
-Override specific settings via command-line arguments:
-
-```bash
-python -m pega_xml_downloader --url https://pega.example.com --output-dir ./xml_output --stages "Initialization,Primary"
-```
-
-### Headless Mode Disabled (for debugging)
+### With browser visible (recommended for first run / debugging)
 
 ```bash
 python -m pega_xml_downloader --headless false
 ```
 
-## Output Structure
+### Target a different Case Type
 
-All output is written to the configured output directory (default: `output/`):
-
-```
-output/
-├── Tax_Compliance_Training_Initialization_Program_Design.xml
-├── Tax_Compliance_Training_Initialization_Another_Rule.xml
-├── Tax_Compliance_Training_Primary_Some_Flow.xml
-├── Tax_Compliance_Training_Alternatives_Alt_Rule.xml
-├── FAILED_Tax_Compliance_Training_Primary_Broken_Rule_20240115T143022.png
-├── execution_log.jsonl
-└── downloader.log
+```bash
+python -m pega_xml_downloader --case-type "My Other Case Type"
 ```
 
-| File | Description |
-|------|-------------|
-| `*.xml` | Extracted rule XML files, named `{CaseType}_{Stage}_{RuleName}.xml` |
-| `FAILED_*.png` | Screenshots captured on extraction failure (for diagnostics) |
-| `execution_log.jsonl` | Structured log with one JSON object per rule processed (status, timestamps, errors) |
-| `downloader.log` | Full application log with timestamps, levels, and module names |
+### Full example with all overrides
 
-### Execution Log Format
+```bash
+python -m pega_xml_downloader \
+  --url https://your-pega-instance.com/prweb \
+  --case-type "Tax Compliance Training" \
+  --output-dir ./downloads \
+  --headless false
+```
 
-Each line in `execution_log.jsonl` is a self-contained JSON object:
+### Debug mode — verbose logging
+
+```bash
+LOG_LEVEL=DEBUG python -m pega_xml_downloader --headless false
+```
+
+---
+
+## Output
+
+All files are written to `OUTPUT_DIR` (default: `output/`):
+
+```
+xml_output/
+├── Tax_Compliance_Training_20260429_162741.xml   ← downloaded XML
+├── FAILED_view_xml_timeout_..._20260429T163000.png  ← screenshot on failure
+├── execution_log.jsonl                           ← structured result log
+└── downloader.log                                ← full run log
+```
+
+### XML filename format
+
+```
+{CaseTypeName}_{YYYYMMDD_HHMMSS}.xml
+```
+
+Example: `Tax_Compliance_Training_20260429_162741.xml`
+
+Each run produces a new uniquely timestamped file — previous downloads are never overwritten.
+
+### Execution log format
+
+`execution_log.jsonl` contains one JSON object per run:
 
 ```json
-{"rule_name": "Program Design", "stage_name": "Initialization", "output_filename": "Tax_Compliance_Training_Initialization_Program_Design.xml", "status": "success", "timestamp": "2024-01-15T14:30:22.123456", "failure_reason": null}
+{"rule_name": "Tax Compliance Training", "stage_name": "CaseType", "output_filename": "Tax_Compliance_Training_20260429_162741.xml", "status": "success", "timestamp": "2026-04-29T16:27:41.506000", "failure_reason": null}
 ```
 
-## Features
+---
 
-- **Idempotent re-runs**: Skips already-downloaded rules based on filesystem and in-memory tracking
-- **Retry with exponential backoff**: Failed extractions are retried up to `MAX_RETRIES` times (2s, 4s, 8s... max 30s)
-- **Screenshot on failure**: Captures browser state when extraction fails for post-run diagnostics
-- **Structured execution log**: JSON Lines format for easy parsing and auditing
-- **Optional parallelism**: Multiple browser sessions via `PARALLEL_WORKERS` for faster processing
-- **Headless operation**: Runs without a visible browser window by default
+## Troubleshooting
+
+| Problem | Fix |
+|---|---|
+| `ModuleNotFoundError` | Run `source venv_mac/bin/activate` first |
+| Login fails | Check `PEGA_USERNAME` / `PEGA_PASSWORD` in `.env` |
+| Case Type not found | Verify `CASE_TYPE_NAME` matches exactly what appears in the Pega UI |
+| XML popup timeout | Run with `--headless false` to watch the browser and identify the issue |
+| Empty XML file | Check `downloader.log` — the popup may have loaded in an unexpected iframe |
+| Screenshot saved but no XML | The `FAILED_*.png` shows the browser state at the point of failure |
+
+---
+
+## Project Structure
+
+```
+pega-rule-xml/
+├── pega_xml_downloader/
+│   ├── __init__.py
+│   ├── __main__.py       # Entry point: python -m pega_xml_downloader
+│   ├── main.py           # Orchestrator
+│   ├── config.py         # Configuration loading + CLI parsing
+│   ├── auth.py           # Pega login
+│   ├── browser.py        # Chrome WebDriver setup
+│   ├── navigator.py      # Dev Studio navigation + XML extraction
+│   ├── storage.py        # File I/O + execution log
+│   └── logger.py         # Logging setup
+├── requirements.txt
+├── .env.example
+├── .gitignore
+└── README.md
+```
+
+---
+
+## Requirements
+
+```
+selenium==4.27.1
+python-dotenv==1.0.1
+```
+
+Install with:
+
+```bash
+pip install -r requirements.txt
+```
