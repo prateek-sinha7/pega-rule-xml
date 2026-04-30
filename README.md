@@ -1,19 +1,24 @@
 # Pega XML Downloader
 
-A Python automation script that logs into the Pega Platform UI using Selenium, navigates to a specified Case Type in Dev Studio, and downloads its XML definition via **Actions → Open → Actions → View XML**.
+A Python automation script that logs into the Pega Platform UI using Selenium, navigates to specified Case Types in Dev Studio, and downloads XML definitions for both the Case Type and all its stage flows via **Actions → View XML**.
 
 ## How It Works
 
 The script follows the exact same steps a developer would take manually:
 
 1. Login to Pega
-2. Switch to Dev Studio
-3. Navigate to Case Types
-4. Locate the target Case Type
-5. Click **Actions → Open**
-6. Click **Actions → View XML**
-7. Extract the XML from the popup window
-8. Save it as `{CaseTypeName}_{YYYYMMDD_HHMMSS}.xml`
+2. Switch to Dev Studio (via workspace switcher)
+3. Navigate to Case Types (inside Developer iframe)
+4. For each Case Type:
+   a. Click the Case Type → **Actions → Open**
+   b. Click **Actions → View XML** (saves Case Type XML)
+   c. Click the **Stages** tab
+   d. For each flow (e.g., Program Design, Training Execution):
+      - Click the flow to select it
+      - Click **Actions → View XML** (saves flow XML)
+   e. Navigate back to Case Types list for the next one
+
+All XML files are organized into per-Case-Type folders.
 
 ---
 
@@ -60,11 +65,11 @@ All settings can be provided via `.env` file, environment variables, or CLI argu
 | `PEGA_URL` | Yes | — | Full URL of the Pega login page |
 | `PEGA_USERNAME` | Yes | — | Pega login username |
 | `PEGA_PASSWORD` | Yes | — | Pega login password |
-| `CASE_TYPE_NAME` | No | `Tax Compliance Training` | Name of the Case Type to open in Dev Studio |
-| `OUTPUT_DIR` | No | `output` | Directory where XML files, logs, and screenshots are saved |
+| `CASE_TYPE_NAMES` | No | `Tax Compliance Training` | Comma-separated list of Case Type names to download |
+| `CASE_TYPE_NAME` | No | — | Single Case Type name (backwards-compatible, use `CASE_TYPE_NAMES` for multiple) |
+| `OUTPUT_DIR` | No | `output` | Root directory where per-Case-Type folders and logs are saved |
 | `HEADLESS` | No | `true` | Run Chrome without a visible window (`true`/`false`) |
 | `MAX_RETRIES` | No | `3` | Retry attempts before marking an extraction as failed |
-| `PARALLEL_WORKERS` | No | `1` | Number of concurrent browser sessions (keep at `1` for stability) |
 | `LOG_LEVEL` | No | `INFO` | Logging verbosity (`DEBUG`, `INFO`, `WARNING`, `ERROR`) |
 
 ### CLI Arguments
@@ -72,7 +77,7 @@ All settings can be provided via `.env` file, environment variables, or CLI argu
 | Argument | Overrides | Description |
 |---|---|---|
 | `--url` | `PEGA_URL` | Pega login page URL |
-| `--case-type` | `CASE_TYPE_NAME` | Case Type name to download |
+| `--case-type` | `CASE_TYPE_NAMES` | Comma-separated Case Type names (e.g., `"Tax Filing,Tax Calculation"`) |
 | `--output-dir` | `OUTPUT_DIR` | Output directory path |
 | `--headless` | `HEADLESS` | Headless mode (`true`/`false`) |
 | `--max-retries` | `MAX_RETRIES` | Max retry attempts |
@@ -93,18 +98,24 @@ python -m pega_xml_downloader
 python -m pega_xml_downloader --headless false
 ```
 
-### Target a different Case Type
+### Download multiple Case Types
 
 ```bash
-python -m pega_xml_downloader --case-type "My Other Case Type"
+python -m pega_xml_downloader --case-type "Tax Compliance Training,Tax Cost Allocation,Tax Filing"
+```
+
+Or set in `.env`:
+
+```
+CASE_TYPE_NAMES=Tax Compliance Training,Tax Cost Allocation,Tax Filing
 ```
 
 ### Full example with all overrides
 
 ```bash
 python -m pega_xml_downloader \
-  --url https://your-pega-instance.com/prweb \
-  --case-type "Tax Compliance Training" \
+  --url "https://your-pega-instance.com/prweb/app/default/..." \
+  --case-type "Tax Compliance Training,Tax Cost Allocation" \
   --output-dir ./downloads \
   --headless false
 ```
@@ -119,35 +130,67 @@ LOG_LEVEL=DEBUG python -m pega_xml_downloader --headless false
 
 ## Output
 
-All files are written to `OUTPUT_DIR` (default: `~/Downloads/`):
+Each Case Type gets its own folder under `OUTPUT_DIR`. The Case Type XML and all stage flow XMLs are saved inside it:
 
 ```
-~/Downloads/
-├── Tax_Compliance_Training_20260429_162741.xml   ← downloaded XML
-├── Tax_Cost_Allocation_20260429_163012.xml
-├── Tax_Data_Collection_20260429_163245.xml
-├── FAILED_view_xml_timeout_..._20260429T163000.png  ← screenshot on failure
-├── execution_log.jsonl                           ← structured result log
-└── downloader.log                                ← full run log
+output/
+├── Tax_Compliance_Training/
+│   ├── Tax_Compliance_Training_20260430_104615.xml          ← Case Type XML
+│   ├── Tax_Compliance_Training_Program_Design_20260430_104622.xml    ← flow XML
+│   ├── Tax_Compliance_Training_Training_Execution_20260430_104625.xml
+│   ├── Tax_Compliance_Training_Competency_Assessment_20260430_104628.xml
+│   ├── Tax_Compliance_Training_Compliance_Reporting_20260430_104631.xml
+│   ├── Tax_Compliance_Training_Remediation_Path_20260430_104634.xml
+│   └── Tax_Compliance_Training_Approval_Rejection_20260430_104637.xml
+├── Tax_Cost_Allocation/
+│   ├── Tax_Cost_Allocation_20260430_104700.xml
+│   ├── Tax_Cost_Allocation_Data_Collection_20260430_104705.xml
+│   └── ...
+├── execution_log.jsonl       ← structured result log
+└── downloader.log            ← full run log
 ```
 
 ### XML filename format
 
-```
-{CaseTypeName}_{YYYYMMDD_HHMMSS}.xml
-```
+- Case Type: `{CaseTypeName}_{YYYYMMDD_HHMMSS}.xml`
+- Stage flow: `{CaseTypeName}_{FlowName}_{YYYYMMDD_HHMMSS}.xml`
 
-Example: `Tax_Compliance_Training_20260429_162741.xml`
-
-Each run produces a new uniquely timestamped file — previous downloads are never overwritten.
+Each run produces uniquely timestamped files — previous downloads are never overwritten.
 
 ### Execution log format
 
-`execution_log.jsonl` contains one JSON object per run:
+`execution_log.jsonl` contains one JSON object per extraction:
 
 ```json
-{"rule_name": "Tax Compliance Training", "stage_name": "CaseType", "output_filename": "Tax_Compliance_Training_20260429_162741.xml", "status": "success", "timestamp": "2026-04-29T16:27:41.506000", "failure_reason": null}
+{"rule_name": "Tax Compliance Training", "stage_name": "CaseType", "output_filename": "Tax_Compliance_Training_20260430_104615.xml", "status": "success", "timestamp": "2026-04-30T10:46:15.000000", "failure_reason": null}
+{"rule_name": "Tax Compliance Training > Program Design", "stage_name": "StageFlow", "output_filename": "Tax_Compliance_Training_Program_Design_20260430_104622.xml", "status": "success", "timestamp": "2026-04-30T10:46:22.000000", "failure_reason": null}
 ```
+
+---
+
+## How the Pega Navigation Works
+
+The script handles Pega's complex iframe-based UI:
+
+1. **Login** → lands in App Studio
+2. **Workspace switch** → `pega.desktop.wks.switchWorkspace("Developer")` switches to Dev Studio
+3. **Developer iframe** → all Dev Studio content is inside `iframe#Developer`
+4. **Case Types tab** → accordion tab with `role="tab"` and `title="Case Types"` (CSS transform requires JS click)
+5. **Case Type link** → `a.explorer_primary` in the tree grid
+6. **PegaGadget iframes** → each Case Type editor loads in a new `PegaGadget{N}Ifr` iframe
+7. **Actions → Open** → opens the Case Type rule in another new PegaGadget iframe
+8. **Stages tab** → `<DIV class="header">Stages</DIV>` accordion header
+9. **Flow names** → `<input name*="ppyStageName">` elements with flow names as values
+10. **Actions → View XML** → dropdown menu items found via JavaScript (XPath can't match nested spans)
+
+---
+
+## Cross-Platform Notes
+
+- Works on both **macOS** and **Windows**
+- On macOS, "View XML" typically opens in a **popup window** — the script closes it after extraction
+- On Windows (headless), "View XML" may render **inline** — the script extracts from `page_source` without navigation
+- File paths use `os.path.join()` for cross-platform compatibility
 
 ---
 
@@ -155,12 +198,14 @@ Each run produces a new uniquely timestamped file — previous downloads are nev
 
 | Problem | Fix |
 |---|---|
-| `ModuleNotFoundError` | Run `source venv_mac/bin/activate` first |
+| `ModuleNotFoundError` | Activate your virtual environment first |
 | Login fails | Check `PEGA_USERNAME` / `PEGA_PASSWORD` in `.env` |
-| Case Type not found | Verify `CASE_TYPE_NAME` matches exactly what appears in the Pega UI |
-| XML popup timeout | Run with `--headless false` to watch the browser and identify the issue |
+| Case Type not found | Verify the name matches exactly as shown in Pega Dev Studio |
+| XML popup timeout | Run with `--headless false` to watch the browser |
 | Empty XML file | Check `downloader.log` — the popup may have loaded in an unexpected iframe |
 | Screenshot saved but no XML | The `FAILED_*.png` shows the browser state at the point of failure |
+| "no such window" error | The browser window was closed unexpectedly — check if View XML rendered inline |
+| Stage flows not downloading | Check that the Stages tab is accessible and flow names are visible |
 
 ---
 
@@ -171,11 +216,11 @@ pega-rule-xml/
 ├── pega_xml_downloader/
 │   ├── __init__.py
 │   ├── __main__.py       # Entry point: python -m pega_xml_downloader
-│   ├── main.py           # Orchestrator
+│   ├── main.py           # Orchestrator — processes each Case Type + stage flows
 │   ├── config.py         # Configuration loading + CLI parsing
 │   ├── auth.py           # Pega login
-│   ├── browser.py        # Chrome WebDriver setup
-│   ├── navigator.py      # Dev Studio navigation + XML extraction
+│   ├── browser.py        # Chrome WebDriver setup + popup handling
+│   ├── navigator.py      # Dev Studio navigation + XML extraction + stage flows
 │   ├── storage.py        # File I/O + execution log
 │   └── logger.py         # Logging setup
 ├── requirements.txt

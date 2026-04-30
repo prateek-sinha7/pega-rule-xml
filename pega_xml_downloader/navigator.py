@@ -693,12 +693,10 @@ def extract_case_type_xml(
             driver.switch_to.window(main_handle)
             logger.info("Closed popup, returned to main window")
         else:
-            try:
-                driver.back()
-                _wait_for_page_ready(driver, timeout=30)
-                logger.info("Navigated back (inline XML)")
-            except Exception as back_exc:
-                logger.warning("Could not navigate back: %s", back_exc)
+            # No popup was opened — XML was extracted inline from page_source.
+            # Do NOT call driver.back() as it would navigate away from Dev Studio.
+            # The XML content is already captured, just return it.
+            logger.info("XML extracted inline (no popup) — no navigation needed")
 
         return xml_content
 
@@ -724,3 +722,350 @@ def extract_case_type_xml(
         return None
 
 
+
+
+def extract_stage_flows_xml(
+    driver: Chrome,
+    case_type_name: str,
+    output_dir: str = "output",
+) -> list:
+    """Extract XML for each flow in the Stages tab of a Case Type rule.
+
+    After Actions → Open has been clicked and the rule view is loaded,
+    this function:
+    1. Re-enters the correct PegaGadget iframe
+    2. Clicks the "Stages" accordion tab to expand it
+    3. Discovers all flow names from <input> elements with name containing 'ppyStageName'
+    4. For each flow: clicks the input to select it → Actions → View XML → extracts XML
+    5. Returns a list of (flow_name, xml_content) tuples
+
+    IMPORTANT: This function only READS data. It clicks input fields to select
+    flows but does NOT modify, edit, or delete anything.
+
+    Args:
+        driver: The active Chrome WebDriver instance.
+        case_type_name: Name of the Case Type (for logging/filenames).
+        output_dir: Directory for screenshots on failure.
+
+    Returns:
+        List of (flow_name, xml_content) tuples. xml_content is None for failed extractions.
+    """
+    main_handle = driver.window_handles[0]
+    results = []
+
+    logger.info("Starting stage flows XML extraction for Case Type '%s'", case_type_name)
+
+    try:
+        # Re-enter the iframe chain: default_content → Developer → last PegaGadget
+        driver.switch_to.default_content()
+        dev_iframe = WebDriverWait(driver, 30).until(
+            EC.presence_of_element_located(
+                (By.CSS_SELECTOR, "iframe#Developer, iframe[name='Developer']")
+            )
+        )
+        driver.switch_to.frame(dev_iframe)
+
+        gadget_els = driver.find_elements(
+            By.CSS_SELECTOR, "iframe[id^='PegaGadget'][id$='Ifr']"
+        )
+
+        def _gadget_num(el):
+            gid = el.get_attribute("id") or ""
+            try:
+                return int(gid.replace("PegaGadget", "").replace("Ifr", ""))
+            except ValueError:
+                return -1
+
+        gadget_els_sorted = sorted(gadget_els, key=_gadget_num)
+        if not gadget_els_sorted:
+            logger.error("No PegaGadget iframes found for stage flows extraction")
+            return results
+
+        target_el = gadget_els_sorted[-1]
+        target_id = target_el.get_attribute("id")
+        driver.switch_to.frame(target_el)
+        logger.info("Switched to PegaGadget iframe '%s' for stage flows", target_id)
+        _wait_for_page_ready(driver, timeout=30)
+
+        # Click the "Stages" accordion tab
+        logger.info("Clicking 'Stages' tab")
+        try:
+            stages_tab = WebDriverWait(driver, 15).until(
+                EC.presence_of_element_located(
+                    (
+                        By.XPATH,
+                        "//div[contains(@class,'header') and normalize-space(.)='Stages'] | "
+                        "//a[normalize-space(.)='Stages']",
+                    )
+                )
+            )
+            driver.execute_script("arguments[0].click();", stages_tab)
+            logger.info("Clicked 'Stages' tab")
+            _wait_for_page_ready(driver)
+        except TimeoutException:
+            logger.warning("Stages tab not found — it may already be expanded")
+
+        # Discover all flow names from <input> elements
+        flow_names = driver.execute_script(
+            """
+            var results = [];
+            var seen = {};
+            var inputs = document.querySelectorAll('input[name*="ppyStageName"]');
+            for (var i = 0; i < inputs.length; i++) {
+                var val = inputs[i].value.trim();
+                if (val && !seen[val]) {
+                    seen[val] = true;
+                    results.push(val);
+                }
+            }
+            return results;
+            """
+        )
+
+        if not flow_names:
+            logger.warning("No flow names found in Stages tab for '%s'", case_type_name)
+            return results
+
+        logger.info(
+            "Discovered %d flows in Stages tab: %s", len(flow_names), flow_names
+        )
+
+        # Extract XML for each flow
+        for idx, flow_name in enumerate(flow_names):
+            logger.info(
+                "--- Processing flow %d/%d: '%s' ---", idx + 1, len(flow_names), flow_name
+            )
+
+            try:
+                # For the first flow, it's already selected — skip clicking
+                if idx > 0:
+                    # Click the input field to select this flow
+                    flow_input = WebDriverWait(driver, 15).until(
+                        EC.presence_of_element_located(
+                            (
+                                By.XPATH,
+                                f"//input[contains(@name,'ppyStageName') and @value='{flow_name}']",
+                            )
+                        )
+                    )
+                    driver.execute_script("arguments[0].click();", flow_input)
+                    logger.info("Clicked flow '%s' to select it", flow_name)
+                    _wait_for_page_ready(driver)
+
+                # Click Actions button
+                actions_button = WebDriverWait(driver, 30).until(
+                    EC.presence_of_element_located(
+                        (
+                            By.XPATH,
+                            "//button[normalize-space(text())='Actions'] | "
+                            "//button[.//span[normalize-space(text())='Actions']] | "
+                            "//a[normalize-space(text())='Actions'] | "
+                            "//*[normalize-space(text())='Actions' and (self::button or self::a)]",
+                        )
+                    )
+                )
+                driver.execute_script("arguments[0].click();", actions_button)
+                logger.info("Clicked 'Actions' for flow '%s'", flow_name)
+                _wait_for_mask_to_clear(driver)
+                time.sleep(1)
+
+                # Dump dropdown items for debugging
+                try:
+                    menu_items = driver.execute_script(
+                        "return Array.from(document.querySelectorAll("
+                        "'[class*=menu] a, [role=menuitem], li a'"
+                        ")).map(e => e.textContent.trim()).filter(t => t);"
+                    )
+                    logger.info("Actions dropdown items for flow '%s': %s", flow_name, menu_items)
+                except Exception:
+                    pass
+
+                # The Actions dropdown menu may be rendered in a way that XPath
+                # can't find "View XML" (e.g., text in nested spans, shadow DOM).
+                # Use JavaScript to find and click it directly.
+                view_xml_clicked = driver.execute_script(
+                    """
+                    var items = document.querySelectorAll('[class*=menu] a, [role=menuitem], li a');
+                    for (var i = items.length - 1; i >= 0; i--) {
+                        if (items[i].textContent.trim() === 'View XML') {
+                            items[i].click();
+                            return true;
+                        }
+                    }
+                    return false;
+                    """
+                )
+                
+                if not view_xml_clicked:
+                    # Try parent frame
+                    logger.info("View XML not clickable in current frame — trying parent")
+                    driver.switch_to.parent_frame()
+                    view_xml_clicked = driver.execute_script(
+                        """
+                        var items = document.querySelectorAll('[class*=menu] a, [role=menuitem], li a');
+                        for (var i = items.length - 1; i >= 0; i--) {
+                            if (items[i].textContent.trim() === 'View XML') {
+                                items[i].click();
+                                return true;
+                            }
+                        }
+                        return false;
+                        """
+                    )
+                
+                if not view_xml_clicked:
+                    logger.error("Could not click 'View XML' for flow '%s'", flow_name)
+                    # Re-enter PegaGadget iframe
+                    try:
+                        driver.switch_to.default_content()
+                        dev_iframe = driver.find_element(By.CSS_SELECTOR, "iframe#Developer, iframe[name='Developer']")
+                        driver.switch_to.frame(dev_iframe)
+                        gadget_els = sorted(
+                            driver.find_elements(By.CSS_SELECTOR, "iframe[id^='PegaGadget'][id$='Ifr']"),
+                            key=_gadget_num
+                        )
+                        if gadget_els:
+                            driver.switch_to.frame(gadget_els[-1])
+                    except Exception:
+                        pass
+                    results.append((flow_name, None))
+                    continue
+                
+                logger.info("Clicked 'View XML' via JS for flow '%s'", flow_name)
+
+                # Wait for popup or inline XML
+                time.sleep(3)
+                current_handles = set(driver.window_handles)
+
+                xml_content = None
+
+                if len(current_handles) > 1:
+                    # Popup opened
+                    new_handles = current_handles - {main_handle}
+                    popup_handle = new_handles.pop()
+                    driver.switch_to.window(popup_handle)
+                    logger.info("Switched to popup for flow '%s'", flow_name)
+                    _wait_for_page_ready(driver, timeout=30)
+
+                    # Handle nested iframes in popup
+                    try:
+                        popup_iframes = driver.find_elements(By.TAG_NAME, "iframe")
+                        if popup_iframes:
+                            driver.switch_to.frame(popup_iframes[0])
+                            _wait_for_page_ready(driver, timeout=15)
+                            nested = driver.find_elements(By.TAG_NAME, "iframe")
+                            if nested:
+                                driver.switch_to.frame(nested[0])
+                                _wait_for_page_ready(driver, timeout=15)
+                    except Exception:
+                        pass
+
+                    # Extract XML
+                    try:
+                        raw_xml = driver.execute_script(
+                            """
+                            var src = document.getElementById('webkit-xml-viewer-source-xml');
+                            if (src) { return src.innerHTML; }
+                            var pre = document.querySelector('pre');
+                            if (pre) { return pre.textContent; }
+                            return null;
+                            """
+                        )
+                        if raw_xml and raw_xml.strip():
+                            xml_content = raw_xml.strip()
+                        else:
+                            xml_content = driver.page_source
+                    except Exception:
+                        xml_content = driver.page_source
+
+                    # Close popup
+                    driver.close()
+                    driver.switch_to.window(main_handle)
+                    logger.info("Closed popup for flow '%s'", flow_name)
+
+                    # Re-enter iframe chain
+                    dev_iframe = WebDriverWait(driver, 15).until(
+                        EC.presence_of_element_located(
+                            (By.CSS_SELECTOR, "iframe#Developer, iframe[name='Developer']")
+                        )
+                    )
+                    driver.switch_to.frame(dev_iframe)
+                    gadget_els = driver.find_elements(
+                        By.CSS_SELECTOR, "iframe[id^='PegaGadget'][id$='Ifr']"
+                    )
+                    gadget_els_sorted = sorted(gadget_els, key=_gadget_num)
+                    if gadget_els_sorted:
+                        driver.switch_to.frame(gadget_els_sorted[-1])
+                    _wait_for_page_ready(driver)
+
+                else:
+                    # Inline XML — extract from page_source
+                    try:
+                        raw_xml = driver.execute_script(
+                            """
+                            var src = document.getElementById('webkit-xml-viewer-source-xml');
+                            if (src) { return src.innerHTML; }
+                            var pre = document.querySelector('pre');
+                            if (pre) { return pre.textContent; }
+                            return null;
+                            """
+                        )
+                        if raw_xml and raw_xml.strip():
+                            xml_content = raw_xml.strip()
+                        else:
+                            xml_content = driver.page_source
+                    except Exception:
+                        xml_content = driver.page_source
+                    logger.info("Extracted inline XML for flow '%s'", flow_name)
+
+                if xml_content and xml_content.strip():
+                    logger.info(
+                        "Extracted XML for flow '%s' (%d characters)",
+                        flow_name,
+                        len(xml_content),
+                    )
+                    results.append((flow_name, xml_content))
+                else:
+                    logger.warning("Empty XML for flow '%s'", flow_name)
+                    results.append((flow_name, None))
+
+            except Exception as exc:
+                logger.error(
+                    "Error extracting XML for flow '%s': %s", flow_name, exc
+                )
+                results.append((flow_name, None))
+
+                # Try to recover — close any popup and re-enter iframe chain
+                try:
+                    if len(set(driver.window_handles)) > 1:
+                        driver.close()
+                        driver.switch_to.window(main_handle)
+                except Exception:
+                    pass
+                try:
+                    driver.switch_to.default_content()
+                    dev_iframe = WebDriverWait(driver, 10).until(
+                        EC.presence_of_element_located(
+                            (By.CSS_SELECTOR, "iframe#Developer, iframe[name='Developer']")
+                        )
+                    )
+                    driver.switch_to.frame(dev_iframe)
+                    gadget_els = driver.find_elements(
+                        By.CSS_SELECTOR, "iframe[id^='PegaGadget'][id$='Ifr']"
+                    )
+                    gadget_els_sorted = sorted(gadget_els, key=_gadget_num)
+                    if gadget_els_sorted:
+                        driver.switch_to.frame(gadget_els_sorted[-1])
+                except Exception:
+                    logger.warning("Recovery failed for flow '%s'", flow_name)
+
+    except Exception as exc:
+        logger.error("Error in stage flows extraction for '%s': %s", case_type_name, exc)
+
+    logger.info(
+        "Stage flows extraction complete for '%s': %d/%d successful",
+        case_type_name,
+        sum(1 for _, xml in results if xml),
+        len(results),
+    )
+    return results

@@ -7,6 +7,7 @@ Supports downloading XML for multiple Case Types in a single browser session.
 """
 
 import logging
+import os
 import traceback
 from datetime import datetime
 from typing import Optional
@@ -27,6 +28,7 @@ from pega_xml_downloader.logger import setup_logging
 from pega_xml_downloader.navigator import (
     NavigationError,
     extract_case_type_xml,
+    extract_stage_flows_xml,
     navigate_to_case_type,
 )
 from pega_xml_downloader.storage import LogEntry, StorageManager
@@ -142,6 +144,12 @@ def _process_case_type(
 
     extraction_ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     case_type_safe = sanitize_filename(case_type_name)
+
+    # Create a subfolder for this Case Type
+    case_type_dir = os.path.join(config.output_dir, case_type_safe)
+    os.makedirs(case_type_dir, exist_ok=True)
+    logger.info("Output folder: %s", case_type_dir)
+
     filename = f"{case_type_safe}_{extraction_ts}.xml"
     logger.info("Output filename: %s", filename)
 
@@ -149,7 +157,10 @@ def _process_case_type(
 
     if xml_content:
         try:
-            file_path = storage.save_xml(filename, xml_content)
+            file_path = os.path.join(case_type_dir, filename)
+            with open(file_path, "w", encoding="utf-8") as f:
+                f.write(xml_content)
+            logger.info("Saved XML file: %s", file_path)
             storage.record_result(
                 LogEntry(
                     rule_name=case_type_name,
@@ -165,6 +176,56 @@ def _process_case_type(
                 case_type_name,
                 file_path,
             )
+
+            # Now extract XML for each flow in the Stages tab
+            logger.info("--- Extracting stage flow XMLs for '%s' ---", case_type_name)
+            flow_results = extract_stage_flows_xml(driver, case_type_name, config.output_dir)
+
+            for flow_name, flow_xml in flow_results:
+                flow_ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+                flow_filename = f"{case_type_safe}_{sanitize_filename(flow_name)}_{flow_ts}.xml"
+
+                if flow_xml:
+                    try:
+                        flow_path = os.path.join(case_type_dir, flow_filename)
+                        with open(flow_path, "w", encoding="utf-8") as f:
+                            f.write(flow_xml)
+                        logger.info("Saved flow XML file: %s", flow_path)
+                        storage.record_result(
+                            LogEntry(
+                                rule_name=f"{case_type_name} > {flow_name}",
+                                stage_name="StageFlow",
+                                output_filename=flow_filename,
+                                status="success",
+                                timestamp=datetime.now().isoformat(),
+                                failure_reason=None,
+                            )
+                        )
+                        logger.info("Saved flow XML '%s': %s", flow_name, flow_path)
+                    except (IOError, OSError) as write_err:
+                        logger.error("Write error for flow '%s': %s", flow_name, write_err)
+                        storage.record_result(
+                            LogEntry(
+                                rule_name=f"{case_type_name} > {flow_name}",
+                                stage_name="StageFlow",
+                                output_filename=flow_filename,
+                                status="failure",
+                                timestamp=datetime.now().isoformat(),
+                                failure_reason=f"Write error: {write_err}",
+                            )
+                        )
+                else:
+                    storage.record_result(
+                        LogEntry(
+                            rule_name=f"{case_type_name} > {flow_name}",
+                            stage_name="StageFlow",
+                            output_filename=flow_filename,
+                            status="failure",
+                            timestamp=datetime.now().isoformat(),
+                            failure_reason="Flow XML extraction returned None",
+                        )
+                    )
+
             return True
         except (IOError, OSError) as write_err:
             logger.error(
